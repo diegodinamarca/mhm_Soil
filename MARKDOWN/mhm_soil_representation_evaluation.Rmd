@@ -1,0 +1,3829 @@
+---
+title: "Soil representation importance for hydrological modelling"
+author: "Diego Dinamarca"
+date: "2024-12-24"
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	fig.align = "center",
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+```{r}
+library(tidyverse)
+library(terra)
+library(sf)
+library(DT)
+library(here)
+library(ggcorrplot)
+library(ggplot2)
+library(viridis)
+library(stars)
+library(exactextractr)
+library(gridExtra)
+library(grid)
+library(RColorBrewer)
+library(patchwork)
+library(ggplot2)
+library(gridExtra)
+library(cowplot)
+library(dplyr)
+library(tidyr)
+library(openair)
+library(ggforce)
+library(ggpirate)
+source(here("SCRIPTS","helper_functions_2.R"))
+
+```
+
+```{r}
+theme_grid = theme(
+        panel.background = element_rect(fill = "snow", ),
+        panel.grid = element_line(color = "grey", ))
+
+get_scale_lim = function(r){
+  values(r) %>%
+    quantile(., c(0.1, 0.9), na.rm = TRUE) %>% 
+    round(., digits = 0)
+}
+plot_raster_facet <- function(r, depth, var, limits, facet_col = "attributes") {
+  color.scale = scale_fill_distiller(type = "seq", palette = 16, direction = 1,
+                                     na.value = "transparent", 
+                                     name = str_c(var),
+                                     limits = limits,
+                                     oob = scales::squish)
+  stars_r = stars::st_as_stars(r)
+  ggplot() +
+    geom_stars(data = stars_r) +  
+    color.scale+
+    theme_map()+
+    coord_fixed()+
+    facet_wrap(.~get(facet_col))+
+    theme(legend.title = element_text(size = 12))
+
+}
+
+plot_raster <- function(r, depth, var, limits) {
+  color.scale = scale_fill_distiller(type = "seq", palette = 16, direction = 1,
+                                     na.value = "transparent", 
+                                     name = str_c(var," ",depth),
+                                     limits = limits,
+                                     oob = scales::squish)
+  ggplot() +
+    geom_stars(data = stars::st_as_stars(r)) +  
+    color.scale+
+    theme_map()+
+    coord_fixed()+
+    theme(legend.title = element_text(size = 12))+
+    theme_grid
+}
+
+
+get_raster_values <- function(r, stat, layer, season) {
+  values(r) %>% 
+    as_tibble() %>% 
+    pivot_longer(cols = c(`mHM-CLSM`,`mHM-FAO`,`mHM-SG`),
+                 names_to = "model", values_to = "SWC") %>% 
+    mutate(stat = stat, layer = layer, season = season) %>% 
+    drop_na()
+}
+```
+
+```{r}
+ model.color = c("mHM-CLSM"="red",
+                 "mHM-SG" = "blue",
+                 "mHM-FAO" = "gold3",
+                 Qobs = "black",
+                 AWC.obs = "black",
+                 Obs = "black")
+cuenca = read_sf("G:/CLSoilMaps/data/shp/cuencas/cuenca_cauquenes.geojson")
+models = c("CLSM","SG","FAO")
+
+
+```
+
+
+
+# AWC representation {.tabset}
+
+```{r}
+# datos estandarizados de suelo
+hwidth = c("0-5 cm" = 50,"5-15 cm" = 100, "15-30 cm" = 150, "30-60 cm" = 300, 
+  "60-100 cm" = 400, "100-200 cm" = 1000)
+soildb = read_csv(here("DATA","TABLE","SOILS","HA_STANDARD.CSV")) %>% 
+  select(-`soil depth`)
+soil.prof =  soildb %>% 
+  # filter(!is.na(`60-100 cm`)) %>%
+  filter(!is.na(`100-200 cm`)) %>%
+  st_as_sf(crs = 4326, coords = c("x","y")) %>% 
+  st_crop(cuenca %>% st_transform(4326)) %>% 
+  pivot_longer(cols = `0-5 cm`:`100-200 cm`,
+               names_to = "layer", values_to = "HA") %>% 
+  rowwise() %>% 
+  mutate(hwidth = hwidth[[layer]],
+         AWC = HA*hwidth) %>% 
+  group_by(id) %>% 
+  summarise(AWC = sum(AWC))
+```
+```{r}
+# depths
+soil.prof = soildb %>% 
+  # filter(!is.na(`60-100 cm`)) %>%
+  filter(!is.na(`100-200 cm`)) %>%
+  st_as_sf(crs = 4326, coords = c("x","y")) %>% 
+  st_crop(cuenca %>% st_transform(4326)) %>% 
+  pivot_longer(cols = `0-5 cm`:`100-200 cm`,
+               names_to = "layer", values_to = "HA") %>% 
+  # filter(layer != "100-200 cm") %>% 
+  rowwise() %>% 
+  mutate(hwidth = hwidth[[layer]],
+         AWC = HA*hwidth) %>% 
+  mutate(new_layer = if_else(layer %in% c("0-5 cm","5-15 cm","15-30 cm",
+                                           "30-60 cm","60-100 cm"), 1, 2)) %>% 
+  group_by(id, new_layer) %>% 
+  summarise(AWC = sum(AWC))
+```
+
+```{r}
+# soildb
+# soil.prof %>% filter(AWC < 20)
+# soildb %>% filter(id == 13247)
+```
+
+
+```{r}
+files.clsm = list.files(here("PROC/RAST/calibrated_model_output/CLSM/AWC_summary"), pattern= "AWC", full.names = TRUE)
+files.fao = list.files(here("PROC/RAST/calibrated_model_output/FAO/AWC_summary"), pattern= "AWC", full.names = TRUE)
+files.sg = list.files(here("PROC/RAST/calibrated_model_output/SG/AWC_summary"), pattern= "AWC", full.names = TRUE)
+
+awc.deep.mean = rast(c(files.clsm[1],files.sg[1],files.fao[1]))
+awc.deep.sd = rast(c(files.clsm[2],files.sg[2],files.fao[2]))
+awc.total.mean = rast(c(files.clsm[3],files.sg[3],files.fao[3]))
+awc.total.sd = rast(c(files.clsm[4],files.sg[4],files.fao[4]))
+awc.up.mean = rast(c(files.clsm[5],files.sg[5],files.fao[5]))
+awc.up.sd = rast(c(files.clsm[6],files.sg[6],files.fao[6]))
+names(awc.deep.mean) = str_c("mHM-", c("CLSM","SG","FAO")) 
+names(awc.deep.sd) = str_c("mHM-", c("CLSM","SG","FAO")) 
+names(awc.total.mean) = str_c("mHM-", c("CLSM","SG","FAO")) 
+names(awc.total.sd) = str_c("mHM-", c("CLSM","SG","FAO")) 
+names(awc.up.mean) = str_c("mHM-", c("CLSM","SG","FAO")) 
+names(awc.up.sd) = str_c("mHM-", c("CLSM","SG","FAO")) 
+
+```
+
+## Same color scale
+
+```{r fig.height=3, fig.width=11}
+scale.lim = get_scale_lim(awc.up.mean)
+plot_raster_facet(awc.up.mean, "0-100[cm]", "AWC.mean", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+
+scale.lim = get_scale_lim(awc.up.sd)
+plot_raster_facet(awc.up.sd, "0-100[cm]", "AWC.sd", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+
+scale.lim = get_scale_lim(awc.deep.mean)
+plot_raster_facet(awc.deep.mean, "100-200[cm]", "AWC.mean", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+
+scale.lim = get_scale_lim(awc.deep.sd)
+plot_raster_facet(awc.deep.sd, "100-200[cm]", "AWC.sd", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+```
+
+## dif color scale
+
+```{r}
+plot.list = list()
+scale.lim = get_scale_lim(awc.up.mean[[1]])
+plot.list[["CLSM"]][["up"]][["mean"]] =  plot_raster(awc.up.mean[[1]], "0-100[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-CLSM - Mean")
+scale.lim = get_scale_lim(awc.up.mean[[2]])
+plot.list[["SG"]][["up"]][["mean"]] =  plot_raster(awc.up.mean[[2]], "0-100[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-SG - Mean")
+scale.lim = get_scale_lim(awc.up.mean[[3]])
+plot.list[["FAO"]][["up"]][["mean"]] =  plot_raster(awc.up.mean[[3]], "0-100[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-FAO - Mean")
+
+scale.lim = get_scale_lim(awc.up.sd[[1]])
+plot.list[["CLSM"]][["up"]][["sd"]] =  plot_raster(awc.up.sd[[1]], "0-100[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-CLSM - SD")
+scale.lim = get_scale_lim(awc.up.sd[[2]])
+plot.list[["SG"]][["up"]][["sd"]] =  plot_raster(awc.up.sd[[2]], "0-100[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-SG - SD")
+scale.lim = get_scale_lim(awc.up.sd[[3]])
+plot.list[["FAO"]][["up"]][["sd"]] =  plot_raster(awc.up.sd[[3]], "0-100[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-FAO - SD")
+
+scale.lim = get_scale_lim(awc.deep.mean[[1]])
+plot.list[["CLSM"]][["deep"]][["mean"]] =  plot_raster(awc.deep.mean[[1]], "100-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-CLSM - Mean")
+scale.lim = get_scale_lim(awc.deep.mean[[2]])
+plot.list[["SG"]][["deep"]][["mean"]] =  plot_raster(awc.deep.mean[[2]], "100-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-SG - Mean")
+scale.lim = get_scale_lim(awc.deep.mean[[3]])
+plot.list[["FAO"]][["deep"]][["mean"]] =  plot_raster(awc.deep.mean[[3]], "100-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-FAO - Mean")
+
+scale.lim = get_scale_lim(awc.deep.sd[[1]])
+plot.list[["CLSM"]][["deep"]][["sd"]] =  plot_raster(awc.deep.sd[[1]], "100-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-CLSM - SD")
+scale.lim = get_scale_lim(awc.deep.sd[[2]])
+plot.list[["SG"]][["deep"]][["sd"]] =  plot_raster(awc.deep.sd[[2]], "100-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-SG - SD")
+scale.lim = get_scale_lim(awc.deep.sd[[3]])
+plot.list[["FAO"]][["deep"]][["sd"]] =  plot_raster(awc.deep.sd[[3]], "100-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-FAO - SD")
+
+scale.lim = get_scale_lim(awc.total.mean[[1]])
+plot.list[["CLSM"]][["total"]][["mean"]] =  plot_raster(awc.total.mean[[1]], "0-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-CLSM - Mean")+theme_map()+theme(plot.title = element_text(face = "plain", hjust = 0.5), legend.title = element_text(size = 11))
+scale.lim = get_scale_lim(awc.total.mean[[2]])
+plot.list[["SG"]][["total"]][["mean"]] =  plot_raster(awc.total.mean[[2]], "0-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-SG - Mean")+theme_map()+theme(plot.title = element_text(face = "plain", hjust = 0.5), legend.title = element_text(size = 11))
+scale.lim = get_scale_lim(awc.total.mean[[3]])
+plot.list[["FAO"]][["total"]][["mean"]] =  plot_raster(awc.total.mean[[3]], "0-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-FAO - Mean")+theme_map()+theme(plot.title = element_text(face = "plain", hjust = 0.5), legend.title = element_text(size = 11))
+
+scale.lim = get_scale_lim(awc.total.sd[[1]])
+plot.list[["CLSM"]][["total"]][["sd"]] =  plot_raster(awc.total.sd[[1]], "0-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-CLSM - SD")+theme_map()+theme(plot.title = element_text(face = "plain", hjust = 0.5), legend.title = element_text(size = 11))
+scale.lim = get_scale_lim(awc.total.sd[[2]])
+plot.list[["SG"]][["total"]][["sd"]] =  plot_raster(awc.total.sd[[2]], "0-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-SG - SD")+theme_map()+theme(plot.title = element_text(face = "plain", hjust = 0.5), legend.title = element_text(size = 11))
+scale.lim = get_scale_lim(awc.total.sd[[3]])
+plot.list[["FAO"]][["total"]][["sd"]] =  plot_raster(awc.total.sd[[3]], "0-200[cm]","AWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("mHM-FAO - SD")+theme_map()+theme(plot.title = element_text(face = "plain", hjust = 0.5), legend.title = element_text(size = 11))
+```
+
+
+```{r fig.height=3, fig.width=11}
+ggpubr::ggarrange(plot.list[["CLSM"]][["up"]][["mean"]],
+                  plot.list[["SG"]][["up"]][["mean"]], 
+                  plot.list[["FAO"]][["up"]][["mean"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["up"]][["sd"]],
+                  plot.list[["SG"]][["up"]][["sd"]], 
+                  plot.list[["FAO"]][["up"]][["sd"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["mean"]],
+                  plot.list[["SG"]][["deep"]][["mean"]], 
+                  plot.list[["FAO"]][["deep"]][["mean"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["sd"]],
+                  plot.list[["SG"]][["deep"]][["sd"]], 
+                  plot.list[["FAO"]][["deep"]][["sd"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["total"]][["mean"]],
+                  plot.list[["SG"]][["total"]][["mean"]], 
+                  plot.list[["FAO"]][["total"]][["mean"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["total"]][["sd"]],
+                  plot.list[["SG"]][["total"]][["sd"]], 
+                  plot.list[["FAO"]][["total"]][["sd"]],
+                  ncol = 3)
+```
+
+```{r fig.height=6, fig.width=12}
+plot.awc.total.mean = ggpubr::ggarrange(plot.list[["CLSM"]][["total"]][["mean"]],
+                  plot.list[["SG"]][["total"]][["mean"]], 
+                  plot.list[["FAO"]][["total"]][["mean"]],
+                  ncol = 3)
+
+plot.awc.total.sd = ggpubr::ggarrange(plot.list[["CLSM"]][["total"]][["sd"]],
+                  plot.list[["SG"]][["total"]][["sd"]], 
+                  plot.list[["FAO"]][["total"]][["sd"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.awc.total.mean, plot.awc.total.sd, nrow = 2, labels = c("a","b"), label.y = 1)
+```
+
+
+## Boxplot of spatial distribution using 2 layers
+
+```{r fig.height=5, fig.width=10}
+layer.name = c("1" = "0-100", "2" = "100-200")
+df1 = get_raster_values(awc.up.mean, stat = "mean", layer = "0-100", season = "release")
+df2 = get_raster_values(awc.up.sd, stat = "sd", layer = "0-100", season = "release")
+df3 = get_raster_values(awc.deep.mean, stat = "mean", layer = "100-200", season = "release")
+df4 = get_raster_values(awc.deep.sd, stat = "sd", layer = "100-200", season = "release")
+df5 = as_tibble(soil.prof) %>%
+  # select(SWC = AWC) %>%
+  mutate(layer = layer.name[new_layer]) %>%
+  mutate(model = "AWC.obs", stat = "mean") %>% 
+  select(model, SWC = AWC, stat, layer)
+
+soil.prof
+as_tibble(soil.prof) %>% group_by(id) %>% slice(1)
+```
+
+
+```{r fig.height=5, fig.width=10}
+df.awc = bind_rows(df1,df2,df3,df4, df5)
+
+df = df.awc %>% 
+  mutate(layer = factor(layer, levels = c("100-200","0-100"))) %>% 
+  rename(AWC = SWC)
+
+# ggplot(df, aes(y = layer, x = SWC, color = model))+
+#   facet_wrap(.~season+stat, scales = "free")+
+#   geom_boxplot()
+```
+
+```{r fig.height=3, fig.width=6}
+boxplot.awc.mean = ggplot(df %>% filter(stat == "mean"), aes(y = layer, x = AWC, color = model))+
+  # facet_wrap(.~season)+
+  geom_boxplot()+
+  labs(x = "AWC [mm]", y = "soil layer [cm]")+
+  ggtitle("Distribution of Available Water Content")+
+  scale_color_manual(values = model.color, name = "",
+                     breaks = c("mHM-SG","mHM-FAO","mHM-CLSM","AWC.obs"))
+boxplot.awc.mean
+boxplot.awc.sd = ggplot(df %>% filter(stat == "sd"), aes(y = layer, x = AWC, color = model))+
+  # facet_wrap(.~season)+
+  geom_boxplot()+
+  labs(x = "AWC.sd [mm]", y = "soil layer [cm]")+
+  ggtitle("Distribution of Available Water Content SD")+
+  scale_color_manual(values = model.color, name = "",
+                     breaks = c("mHM-SG","mHM-FAO","mHM-CLSM"))
+boxplot.awc.sd
+```
+```{r fig.height=3, fig.width=6}
+boxplot.awc.mean2 = ggplot(df %>% filter(stat == "mean") %>%
+                              mutate(layer = factor(layer, levels = rev(c("100-200","0-100")))), aes(x = model, y = AWC, color = layer))+
+  # facet_wrap(.~season)+
+  geom_boxplot()+
+  labs(y = "AWC [mm]", color = "soil layer [cm]", x = "")+
+  ggtitle("Distribution of Available Water Content")+
+  scale_x_discrete(labels = c("AWC.obs" = "Observed"))
+  # scale_color_manual(values = model.color, name = "")
+boxplot.awc.mean2
+boxplot.awc.sd2 = ggplot(df %>% filter(stat == "sd") %>%
+                              mutate(layer = factor(layer, levels = rev(c("100-200","0-100")))), aes(x = model, y = AWC, color = layer))+
+  # facet_wrap(.~season)+
+  geom_boxplot()+
+  labs(y = "AWC.sd [mm]", color = "soil layer [cm]", x = "")+
+  ggtitle("Distribution of Available Water Content SD")+
+  scale_x_discrete(labels = c("AWC.obs" = "Observed"))
+  # scale_color_manual(values = model.color, name = "")
+boxplot.awc.sd2
+```
+
+## Boxplot of spatial distribution total AWC
+
+```{r}
+df1 = get_raster_values(awc.total.mean, stat = "mean", layer = "0-200", season = "release")
+df2 = get_raster_values(awc.total.sd, stat = "sd", layer = "0-200", season = "release")
+
+df.awc = bind_rows(df1,df2)
+
+df = df.awc %>% 
+  rename(AWC = SWC)
+```
+
+```{r fig.height=3, fig.width=10}
+ggplot(df %>% filter(stat == "mean"), aes(y = layer, x = AWC, color = model))+
+  # facet_wrap(.~season)+
+  geom_boxplot()+
+  labs(x = "SWC.mean [mm]")+
+  ggtitle("Mean")
+ggplot(df %>% filter(stat == "sd"), aes(y = layer, x = AWC, color = model))+
+  # facet_wrap(.~season)+
+  geom_boxplot()+
+  labs(x = "SWC.sd [mm]")+
+  ggtitle("SD")
+```
+
+## Paper Figure 5
+
+```{r fig.height=12, fig.width=12}
+p2 = ggpubr::ggarrange(plot.awc.total.mean, plot.awc.total.sd,
+                       boxplot.awc.mean, labels = c("a","b","c"), ncol = 1)
+p2
+```
+```{r eval=FALSE, fig.height=7, fig.width=10, include=FALSE}
+ggsave(filename = here("resultados","figs","models.awc.png"), height = 9, width = 12, plot = p2)
+ggsave(filename = here("resultados","figs","models.awc.svg"), height = 9, width = 12, plot = p2)
+```
+
+# Texture class maps
+
+```{r}
+# Directorio de los mapas de suelo input de mHM
+model = c("CLSM","SG","FAO")
+soilmap.name = c("CLSM","SG","HWSD")
+names(soilmap.name) = model
+in.dir = here("PROC","RAST","TEX.CLASS.MHM",model)
+
+
+plot.list = list()
+freq.plot.list = list()
+class.color = RColorBrewer::brewer.pal(11, "Set3")
+
+class.color = c("#8DD3C7","#FFFFB3","#BEBADA",
+                "#FB8072","#80B1D3",
+                "#FDB462","#B3DE69","#FCCDE5",
+                "#D9D9D9","#BC80BD","#CCEBC5")
+
+class.color = c("#FDB462","#B3DE69","#FCCDE5",
+                "#FB8072","#FFFFB3",
+                "#CCEBC5","#80B1D3","#BEBADA",
+                "#D9D9D9","#BC80BD","#8DD3C7")
+
+class.color = c("#FF3388","#CCFF55","#FFBBBB",
+                "#CCAA44","#CCCC77",
+                "#FFFF11","#33CC44","#CC7744",
+                "#FFAA66","#FFFF77","#FF9900")
+
+class.color = c("#FF6666","#FFFF11","#33CC44",
+                "#CCAA44","#CCCC77",
+                "#FFBBBB","#FF9900","#CC7744",
+                "#FFAA66","#FFFF77","#CCFF55")
+
+class.color = RColorBrewer::brewer.pal(11, "Paired")
+class.color = c("#A6CEE3","#1F78B4","#B2DF8A",
+                "#33A02C","#FB9A99",
+                "#E31A1C","#FDBF6F","#FF7F00",
+                "#CAB2D6","#6A3D9A","#FFFF99")
+
+names(class.color)=c("Cl", "ClLo", "Lo", "LoSa", "Sa", "SaCl", "SaClLo", "SaLo", "SiCl", "SiClLo", "SiLo")
+# names(class.color)=c("Cl", "ClLo", "Lo", "LoSa", "Sa", "SaCl", "SaClLo", "SaLo", "SiCl", "SiClLo", "SiLo")
+
+# LUT
+tex.layer = c("up","deep")
+count = 0
+for (i in 1:3){
+  # i=1
+  for (j in 1:2){
+    # i=1;j=1
+    count = count + 1
+    l = tex.layer[j]
+    LUT = read_csv(here(in.dir[i], str_c("LUT_",l,".csv"))) %>% select(class, class.id)
+    class = LUT$class
+    names(class) = LUT$class.id
+    class
+    file = list.files(in.dir[i], pattern = str_c("tex_",l,".tif$"), full.names = TRUE)
+    r = rast(file)
+    # plot(r)
+    # values(r, na.rm = TRUE, dataframe = TRUE) %>% unique
+    names(r) = "soil_texture"
+    rmask = mask(r, cuenca)
+    # plot(rmask)
+    
+    
+    freq.plot.list[[i]] = freq(rmask) %>% 
+      # rowwise() %>% 
+      mutate(class = class[value]) %>% 
+      # group_by(layer) %>% 
+      mutate(count = round(100*count/sum(count), digits = 1)) %>% 
+      ggplot(aes(x = class, y = count))+
+      # facet_wrap(.~layer)+
+      geom_col(aes(fill = class))+
+      scale_fill_manual(values = class.color)+
+      labs(y = "Relative soil class cover [%]", x = "", title = str_c(model[i]))
+    
+    
+    # Convert raster to a data frame for use with ggplot
+    raster_df <- as.data.frame(rmask, xy = TRUE, na.rm = TRUE)
+    raster_df %>% as_tibble
+    # Join the raster data frame with the land cover classes
+    raster_df <- raster_df %>%
+      # rename(layer = 3) %>% 
+      # mutate(ID = as.integer(layer)) %>%  # Assuming 'layer' is the column with raster values
+      left_join(LUT, by = c("soil_texture"="class.id"))
+    # raster_df %>% as_tibble
+    
+    
+    
+    # Plot using ggplot
+    class.plot = ggplot(raster_df, aes(x = x, y = y, fill = class)) +
+      geom_raster() +
+      # scale_fill_brewer(type = "qual")+
+      scale_fill_manual(values = class.color)+
+      coord_equal() +
+      theme_map() +
+      labs(fill = if_else((count %% 2) == 1,"TC 0-1 m.","TC 1-2 m."), 
+           title = if_else((count %% 2) == 1, soilmap.name[[model[i]]], ""))+
+      theme(plot.title = element_text(hjust = 0.5, face = "plain"),
+            # panel.background = element_rect(fill = "white"),
+            # plot.background = element_rect(fill = "white")
+      )
+    if (count == 1){
+      leg_up = get_legend(class.plot)
+    }
+    if (count == 2){
+      leg_deep = get_legend(class.plot)
+    }
+    plot.list[[count]] = class.plot
+    # class.plot
+  }
+}
+```
+
+## Paper Figure 2
+
+```{r fig.height=6, fig.width=12}
+tex.up = ggpubr::ggarrange(plot.list[[1]], plot.list[[3]], plot.list[[5]], common.legend = TRUE, legend.grob = leg_up, ncol = 3, legend = "right")
+tex.deep = ggpubr::ggarrange(plot.list[[2]], plot.list[[4]], plot.list[[6]], common.legend = TRUE, legend.grob = leg_deep, ncol = 3, legend = "right")
+
+tex.maps = ggpubr::ggarrange(tex.up, tex.deep, ncol = 1, labels = c("a","b"))
+ggsave(here("resultados","figs","soiltextures_2layers.png"), width = 12, height = 6, 
+       plot = tex.maps)
+tex.maps
+```
+
+
+# Streamflow validation
+
+```{r}
+df1 = read_csv(here("PROC","TABLE","simulated_streamflow_iterations_CLSM.csv")) %>% mutate(model = "CLSM")
+df2 = read_csv(here("PROC","TABLE","simulated_streamflow_iterations_SG.csv")) %>% mutate(model = "SG")
+df3 = read_csv(here("PROC","TABLE","simulated_streamflow_iterations_FAO.csv")) %>% mutate(model = "FAO")
+
+df = bind_rows(df1,df2,df3) %>%
+  mutate(
+    m = month(date),
+    season = case_when(
+      m %in% 5:10 ~ "Accumulation",
+      m %in% c(11, 12, 1:4) ~ "Release"
+    ))
+```
+
+## Daily streamflow model calibration metric (lnNSE)
+
+```{r}
+df %>% filter(!is.na(qobs)) %>% 
+  filter(model == "CLSM") %>% 
+  nrow
+
+it_metrics_noseason = df %>%
+  pivot_longer(cols = starts_with("qsim"), names_to = "iteration", values_to = "qsim") %>% 
+  drop_na() %>% 
+  group_by(iteration, model) %>% 
+  do(calculate_error_metrics(.$qobs, .$qsim)) %>% 
+  mutate(model = str_c("mHM-",model))
+
+it_metrics_noseason %>% ggplot()+
+  geom_boxplot(aes(x = model, y = lnNSE, color = model))+
+  # facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = bquote("lnNSE"))+
+  scale_color_discrete(type = model.color, name = "")
+
+it_cal_metrics = it_metrics_noseason %>% group_by(model) %>%
+  summarise(lnNSE_mean = mean(lnNSE),
+            lnNSE_sd = sd(lnNSE, na.rm = T),
+            lnNSE_min = min(lnNSE),
+            lnNSE_max = max(lnNSE)) %>% 
+  mutate(across(where(is.numeric), ~round(.x, digits = 3)))
+it_cal_metrics
+write_csv(it_cal_metrics, file = here("RESULTADOS","TABLE","calibration_lnNSE.csv"))
+```
+
+## Daily streamflow model evaluarion metrics
+
+```{r}
+it_metrics = df %>%
+  pivot_longer(cols = starts_with("qsim"), names_to = "iteration", values_to = "qsim") %>% 
+  drop_na() %>% 
+  group_by(iteration, model,season) %>% 
+  do(calculate_error_metrics(.$qobs, .$qsim)) %>% 
+  mutate(model = str_c("mHM-",model))
+# it_metrics
+```
+
+Analisis estadistico en base a:
+https://statsandr.com/blog/anova-in-r/
+https://statsandr.com/blog/kruskal-wallis-test-nonparametric-version-anova/
+
+Stadistical test for release season
+
+```{r}
+model.aov = aov(kge ~ model, data = it_metrics %>% filter(season == "Release"))
+par(mfrow = c(1, 2)) # combine plots
+# histogram
+hist(model.aov$residuals)
+# QQ-plot
+library(car)
+qqPlot(model.aov$residuals,
+  id = FALSE # id = FALSE to remove point identification
+)
+# Testing normality of residuals of the model
+shapiro.test(model.aov$residuals)
+
+do_aov <- function(metric, sea){
+  model.aov =aov(as.formula(str_c(metric, " ~ model")),
+                            data = it_metrics %>% filter(season == sea))
+  # par(mfrow = c(1, 2)) # combine plots
+  # # histogram
+  # hist(model.aov$residuals)
+  # # QQ-plot
+  # library(car)
+  # qqPlot(model.aov$residuals,
+  #        id = FALSE # id = FALSE to remove point identification
+  # )
+  # Testing normality of residuals of the model
+  shapiro.test(model.aov$residuals)
+}
+```
+
+
+```{r eval=FALSE, include=FALSE}
+do_aov("kge", "Release")
+do_aov("correlation", "Release")
+do_aov("nrmse", "Release")
+do_aov("pbias", "Release")
+do_aov("kge", "Accumulation")
+do_aov("correlation", "Accumulation")
+do_aov("nrmse", "Accumulation")
+do_aov("pbias", "Accumulation")
+```
+
+
+```{r}
+kruskal.test(as.formula(str_c("kge", " ~ model")),
+    data = it_metrics %>% filter(season == "Release")
+  )$stat
+do_kruskal <- function(metric, sea) {
+  kru.res = kruskal.test(as.formula(str_c(metric, " ~ model")),
+    data = it_metrics %>% filter(season == sea)
+  )
+  stat = round(kru.res$statistic, digits = 2)
+  pvalue = kru.res$p.value
+  method = kru.res$method
+  dataname = kru.res$data.name
+  if (pvalue < 0.05){
+    signif = TRUE
+  }else{
+    signif=FALSE
+  }
+  return(tibble(metric = metric, season = sea, stat, pvalue, signif = signif))
+}
+kruskal.df = bind_rows(
+do_kruskal("kge", "Release"),
+do_kruskal("correlation", "Release"),
+do_kruskal("nrmse", "Release"),
+do_kruskal("pbias", "Release"),
+do_kruskal("kge", "Accumulation"),
+do_kruskal("correlation", "Accumulation"),
+do_kruskal("nrmse", "Accumulation"),
+do_kruskal("pbias", "Accumulation")
+)
+kruskal.df
+```
+
+
+```{r}
+kruskal.df %>% write_csv(here("Resultados","table","kruskal_streamflow.csv"))
+```
+
+
+```{r}
+library(FSA)
+do_dunn <- function(metric, sea) {
+  dun.res = dunnTest(
+    x = as.formula(str_c(metric, " ~ model")),
+    data = it_metrics %>% filter(season == sea),
+    method = "holm"
+  )
+  # return(dun.res)
+  return(tibble(metric = metric, season = sea, as_tibble(dun.res$res)))
+}
+
+dunn.df = bind_rows(
+do_dunn("kge", "Release"),
+do_dunn("correlation", "Release"),
+do_dunn("nrmse", "Release"),
+do_dunn("pbias", "Release"),
+do_dunn("kge", "Accumulation"),
+do_dunn("correlation", "Accumulation"),
+do_dunn("nrmse", "Accumulation"),
+do_dunn("pbias", "Accumulation")
+) %>% 
+  mutate(
+    # P.adj = round(P.adj, digits = 3),
+    sig.different = P.adj < 0.05,
+    Z = round(Z, digits = 2),
+    P.unadj = formatC(P.unadj, format = "e", digits = 2),
+    P.adj = formatC(P.adj, format = "e", digits = 2)
+  )
+dunn.df %>% print(n = 24)
+```
+```{r}
+dunn.df %>% write_csv(here("Resultados","table","dunn_streamflow.csv"))
+```
+
+
+```{r}
+library(ggstatsplot)
+ggbetweenstats(
+  data = it_metrics %>% filter(season == "Release"),
+  x = model,
+  y = kge,
+  type = "nonparametric", # ANOVA or Kruskal-Wallis
+  plot.type = "box",
+  pairwise.comparisons = TRUE,
+  pairwise.display = "significant",
+  centrality.plotting = FALSE,
+  bf.message = FALSE, ylab = "KGE",
+)
+```
+
+Stadistical test on KGE for accumulation season
+
+```{r}
+model.aov =aov(kge ~ model, data = it_metrics %>% filter(season == "Accumulation"))
+par(mfrow = c(1, 2)) # combine plots
+# histogram
+hist(model.aov$residuals)
+# QQ-plot
+qqPlot(model.aov$residuals,
+  id = FALSE # id = FALSE to remove point identification
+)
+
+# Testing normality of residuals of the model
+shapiro.test(model.aov$residuals)
+
+
+kruskal.test(kge ~ model,
+  data = it_metrics %>% filter(season == "Accumulation")
+)
+
+dunnTest(kge ~ model,
+  data = it_metrics %>% filter(season == "Accumulation"),
+  method = "holm"
+)
+```
+
+```{r}
+ggbetweenstats(
+  data = it_metrics %>% filter(season == "Accumulation"),
+  x = model,
+  y = kge,
+  type = "nonparametric", # ANOVA or Kruskal-Wallis
+  plot.type = "box",
+  pairwise.comparisons = TRUE,
+  pairwise.display = "significant",
+  centrality.plotting = FALSE,
+  bf.message = FALSE, ylab = "KGE",
+)
+```
+
+
+```{r fig.height=7, fig.width=11}
+pmetrics = list()
+
+pmetrics[[1]] = it_metrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = r, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = "Correlation (r)")+
+  scale_color_discrete(type = model.color, name = "")
+
+pmetrics[[2]] = it_metrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = bias, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = bquote("Bias ["*m^3*s^-1*"]"))+
+  scale_color_discrete(type = model.color, name = "")
+
+pmetrics[[3]] = it_metrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = rmse, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = bquote("RMSE ["*m^3*s^-1*"]"))+
+  scale_color_discrete(type = model.color, name = "")
+
+pmetrics[[4]] = it_metrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = kge, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = "KGE")+
+  scale_color_discrete(type = model.color, name = "")
+
+pmetrics[[5]] = it_metrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = pbias, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+    labs(x = "", y = "PBIAS [%]")+
+  scale_color_discrete(type = model.color, name = "")
+
+pmetrics[[6]] = it_metrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = nrmse, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = bquote("NRMSE [%]"))+
+  scale_color_discrete(type = model.color, name = "")
+
+pmetrics[[7]] = it_metrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = lnNSE, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = bquote("lnNSE"))+
+  scale_color_discrete(type = model.color, name = "")
+
+metrics.plot = ggpubr::ggarrange(
+  pmetrics[[5]],pmetrics[[6]],pmetrics[[4]], pmetrics[[1]],
+  ncol = 2, nrow = 2, labels = c("b","c","d","e"), common.legend = TRUE, legend = "bottom")
+metrics.plot
+```
+
+```{r eval=FALSE, include=FALSE}
+ggsave(here("RESULTADOS","FIGS","METRICS_STREAMFLOW","daily_metrics.png"),
+       width = 11, height = 7, plot = metrics.plot)
+ggsave(here("RESULTADOS","FIGS","METRICS_STREAMFLOW","daily_metrics.svg"),
+       width = 11, height = 7, plot = metrics.plot)
+```
+
+daily metrics using log10(q)
+
+```{r fig.height=8, fig.width=8}
+it_logmetrics = df %>% 
+  pivot_longer(cols = starts_with("qsim"), names_to = "iteration", values_to = "qsim") %>% 
+  drop_na() %>% 
+  group_by(iteration, model, season) %>% 
+  do(calculate_error_metrics(log(.$qobs, base = 10), log(.$qsim, base = 10))) %>% 
+  mutate(model = str_c("mHM-",model))
+```
+
+```{r fig.height=7, fig.width=11}
+logmetrics = list()
+
+logmetrics[[1]] = it_logmetrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = r))+
+  facet_wrap(.~season, nrow = 1, scales = "free")+
+  labs(x = "", y = "Correlation (r)")
+
+logmetrics[[2]] = it_logmetrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = bias))+
+  facet_wrap(.~season, nrow = 1, scales = "free")+
+  labs(x = "", y = bquote("Bias ["*m^3*s^-1*"]"))
+
+logmetrics[[3]] = it_logmetrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = rmse))+
+  facet_wrap(.~season, nrow = 1, scales = "free")+
+  labs(x = "", y = bquote("RMSE ["*m^3*s^-1*"]"))
+
+logmetrics[[4]] = it_logmetrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = kge))+
+  facet_wrap(.~season, nrow = 1, scales = "free")+
+  labs(x = "", y = "KGE")
+
+logmetrics[[5]] = it_logmetrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = pbias))+
+  facet_wrap(.~season, nrow = 1, scales = "free")+
+    labs(x = "", y = "PBIAS [%]")
+
+
+logmetrics.plot = ggpubr::ggarrange(
+  logmetrics[[5]],logmetrics[[2]],logmetrics[[3]],logmetrics[[4]], logmetrics[[1]],
+  ncol = 2, nrow = 3, labels = c("a","b","c","d","e"))
+logmetrics.plot
+```
+
+```{r eval=FALSE, include=FALSE}
+ggsave(here("RESULTADOS","FIGS","METRICS_STREAMFLOW","daily_logmetrics.png"),
+       width = 10, height = 8, plot = logmetrics.plot)
+```
+
+## Monthly streamflow validation metrics
+
+```{r}
+it_metrics_month = df %>%
+  mutate(date = floor_date(date, unit = "month")) %>% 
+  group_by(model, date, season) %>% 
+  summarise(across(where(is.numeric), mean)) %>% 
+  pivot_longer(cols = starts_with("qsim"), names_to = "iteration", values_to = "qsim") %>% 
+  drop_na() %>% 
+  group_by(iteration, model, season) %>% 
+  do(calculate_error_metrics(.$qobs, .$qsim)) %>% 
+  mutate(model = str_c("mHM-",model))
+```
+
+```{r fig.height=7, fig.width=13}
+pmetrics = list()
+
+pmetrics[[1]] = it_metrics_month %>% ggplot()+
+  geom_boxplot(aes(x = model, y = r, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = "Correlation (r)")+
+  scale_color_discrete(type = model.color, name = "")
+
+pmetrics[[2]] = it_metrics_month %>% ggplot()+
+  geom_boxplot(aes(x = model, y = bias, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = bquote("Bias ["*m^3*s^-1*"]"))+
+  scale_color_discrete(type = model.color, name = "")
+
+pmetrics[[3]] = it_metrics_month %>% ggplot()+
+  geom_boxplot(aes(x = model, y = rmse, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = bquote("RMSE ["*m^3*s^-1*"]"))+
+  scale_color_discrete(type = model.color, name = "")
+
+pmetrics[[4]] = it_metrics_month %>% ggplot()+
+  geom_boxplot(aes(x = model, y = kge, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = "KGE")+
+  scale_color_discrete(type = model.color, name = "")
+
+pmetrics[[5]] = it_metrics_month %>% ggplot()+
+  geom_boxplot(aes(x = model, y = pbias, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+    labs(x = "", y = "PBIAS [%]")+
+  scale_color_discrete(type = model.color, name = "")
+
+pmetrics[[6]] = it_metrics %>% ggplot()+
+  geom_boxplot(aes(x = model, y = nrmse, color = model))+
+  facet_wrap(.~season, nrow = 1, scales = "free_x")+
+  labs(x = "", y = bquote("NRMSE [%]"))+
+  scale_color_discrete(type = model.color, name = "")
+
+metrics.plot.month = ggpubr::ggarrange(
+  pmetrics[[5]],pmetrics[[6]],pmetrics[[4]], pmetrics[[1]],
+  ncol = 2, nrow = 2, labels = c("a","b","c","d","e"))
+metrics.plot.month
+```
+
+```{r eval=FALSE, include=FALSE}
+ggsave(here("RESULTADOS","FIGS","METRICS_STREAMFLOW","monthly_metrics.png"),
+       width = 13, height = 7, plot = metrics.plot.month)
+```
+
+```{r}
+it_logmetrics_month = df %>%
+  mutate(date = floor_date(date, unit = "month")) %>% 
+  group_by(model, date, season) %>% 
+  summarise(across(where(is.numeric), mean)) %>% 
+  pivot_longer(cols = starts_with("qsim"), names_to = "iteration", values_to = "qsim") %>% 
+  drop_na() %>% 
+  group_by(iteration, model, season) %>% 
+  do(calculate_error_metrics(log(.$qobs, base = 10), log(.$qsim, base = 10))) %>% 
+  mutate(model = str_c("mHM-",model))
+```
+
+```{r fig.height=7, fig.width=13}
+logmetrics = list()
+
+logmetrics[[1]] = it_logmetrics_month %>% ggplot()+
+  geom_boxplot(aes(x = model, y = r))+
+  facet_wrap(.~season, nrow = 1, scales = "free")+
+  labs(x = "", y = "Correlation (r)")
+
+logmetrics[[2]] = it_logmetrics_month %>% ggplot()+
+  geom_boxplot(aes(x = model, y = bias))+
+  facet_wrap(.~season, nrow = 1, scales = "free")+
+  labs(x = "", y = bquote("Bias ["*m^3*s^-1*"]"))
+
+logmetrics[[3]] = it_logmetrics_month %>% ggplot()+
+  geom_boxplot(aes(x = model, y = rmse))+
+  facet_wrap(.~season, nrow = 1, scales = "free")+
+  labs(x = "", y = bquote("RMSE ["*m^3*s^-1*"]"))
+
+logmetrics[[4]] = it_logmetrics_month %>% ggplot()+
+  geom_boxplot(aes(x = model, y = kge))+
+  facet_wrap(.~season, nrow = 1, scales = "free")+
+  labs(x = "", y = "KGE")
+
+logmetrics[[5]] = it_logmetrics_month %>% ggplot()+
+  geom_boxplot(aes(x = model, y = pbias))+
+  facet_wrap(.~season, nrow = 1, scales = "free")+
+    labs(x = "", y = "PBIAS [%]")
+
+logmetrics.plot = ggpubr::ggarrange(
+  logmetrics[[5]],logmetrics[[2]],logmetrics[[3]],logmetrics[[4]], logmetrics[[1]],
+  ncol = 2, nrow = 3, labels = c("a","b","c","d","e"))
+logmetrics.plot
+```
+
+```{r eval=FALSE, include=FALSE}
+ggsave(here("RESULTADOS","FIGS","METRICS_STREAMFLOW","monthly_logmetrics.png"),
+       width = 10, height = 8, plot = logmetrics.plot)
+```
+
+```{r}
+summary_df = df %>% 
+  drop_na() %>%
+  filter(date > "1986-12-31",
+         date < "2024-01-01") %>% 
+  pivot_longer(cols = starts_with("qsim"), names_to = "iteration", values_to = "qsim") %>% 
+  group_by(date, model, season) %>% 
+  summarise(
+    qobs = mean(qobs),
+    qsim_min = min(qsim),
+    qsim_p10 = quantile(qsim, 0.1),
+    qsim_mean = mean(qsim),
+    qsim_sd = sd(qsim),
+    qsim_median = median(qsim),
+    qsim_p90 = quantile(qsim, 0.9),
+    qsim_max = max(qsim)
+  ) %>%
+  mutate(model = str_c("mHM-",model))
+```
+
+## Monthly streamflow
+
+```{r}
+summary_month = summary_df %>% 
+  mutate(time_month = floor_date(date, unit = "month")) %>% 
+  group_by(time_month, model, season) %>% 
+  summarise(across(where(is.numeric), mean, na.rm =TRUE))
+
+start_date = "2023-01-01"
+end_date = "2023-12-01"
+summary_month %>% 
+ggplot(aes(x = time_month))+
+  # facet_wrap(.~var, scales = "free_y")+
+  geom_ribbon(aes(ymin = qsim_mean-qsim_sd, ymax = qsim_mean+qsim_sd, fill = model),
+              alpha = 0.4, show.legend = F)+
+    geom_line(aes(y = qsim_mean, color = model), size = 1)+
+  geom_line(aes(y = qobs, color = "Qobs"), size = 1)+
+  scale_x_date(limits = c(ymd(start_date),ymd(end_date)))
+  # scale_color_manual(name = "Model", values = model.col)+
+  # scale_fill_manual(name = "Model", values = model.col)
+```
+
+```{r}
+metrics = summary_month %>% 
+  group_by(model, season) %>% 
+  do(calculate_error_metrics(.$qobs, .$qsim_mean)) %>% 
+  arrange(season)
+metrics.re = metrics %>% filter(season == "Release")
+metrics.ac = metrics %>% filter(season == "Accumulation")
+summary_month %>% 
+  filter(season == "Accumulation") %>% 
+  ggplot(aes(x = qobs, y = qsim_mean))+
+  geom_point()+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  metrics.ac, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+  ggtitle("Accumulation season - monthly streamflow")
+
+summary_month %>% 
+  filter(season == "Release") %>% 
+  ggplot(aes(x = qobs, y = qsim_mean))+
+  geom_point()+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  metrics.re, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+    ggtitle("Release season - monthly streamflow")
+
+```
+
+```{r}
+lmetrics = summary_month %>% 
+  group_by(model, season) %>% 
+  do(calculate_error_metrics(log(.$qobs, base = 10), log(.$qsim_mean, base = 10))) %>% 
+  arrange(season)
+lmetrics.re = lmetrics %>% filter(season == "Release")
+lmetrics.ac = lmetrics %>% filter(season == "Accumulation")
+summary_month %>% 
+  filter(season == "Accumulation") %>% 
+  ggplot(aes(x = log(qobs, base = 10), y = log(qsim_mean, base = 10)))+
+  geom_point()+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  lmetrics.ac, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+    ggtitle("Accumulation season - log of monthly streamflow")
+
+
+summary_month %>% 
+  filter(season == "Release") %>% 
+  ggplot(aes(x = log(qobs, base = 10), y = log(qsim_mean, base = 10)))+
+  geom_point()+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  lmetrics.re, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+    ggtitle("Release season - log of monthly streamflow")
+
+```
+
+### Standard deviation
+
+```{r}
+summary_month %>% 
+  ggplot(aes(x = model, y = qsim_sd))+
+  facet_wrap(.~season, scales = "free")+
+  geom_boxplot()
+```
+
+## LTM monthly streamflow
+
+```{r eval=FALSE, fig.height=8, fig.width=12, include=FALSE}
+ggsave(here("RESULTADOS","FIGS","SUMMARY_STREAMFLOW","LTM_STREAMFLOW.PNG"),
+        width = 8, height = 6)
+```
+
+## LTM streamflow (boxplot)
+
+distribution of LTM streamflow, considering all 100 simulations for each day.
+
+```{r}
+df.qobs = df %>% drop_na() %>%
+  filter(model == "CLSM") %>%
+  mutate(m = factor(m, levels = c(5:12, 1:4))) %>%
+  select(date, q = qobs, m, season) %>%
+  mutate(model = "Qobs")
+
+df %>%
+  drop_na() %>%
+  filter(date > "1986-12-31",
+         date < "2024-01-01") %>%
+  pivot_longer(cols = starts_with("qsim"), names_to = "iteration", values_to = "qsim") %>%
+  group_by(date, model, m, season) %>%
+  summarise(qsim = mean(qsim)) %>%
+  mutate(m = factor(m, levels = c(5:12, 1:4))) %>%
+  rename(q = qsim) %>%
+  # select(-qobs) %>%
+  bind_rows(df.qobs) %>%
+  mutate(model = factor(model, levels = c("CLSM","SG","FAO","Qobs"))) %>%
+  ggplot(aes(x = m))+
+  geom_boxplot(aes(y = q, color = model), outliers = FALSE)+
+  facet_wrap(.~season, ncol = 1, scales = "free")+
+  scale_x_discrete(breaks = c(5:12, 1:4), labels = month.abb[c(5:12, 1:4)])
+
+df %>%
+  drop_na() %>%
+  filter(date > "1986-12-31",
+         date < "2024-01-01") %>%
+  pivot_longer(cols = starts_with("qsim"), names_to = "iteration", values_to = "qsim") %>%
+  mutate(date = floor_date(date, unit = "months")) %>% 
+  group_by(date, model, m, season, iteration) %>%
+  summarise(qsim = mean(qsim)) %>%
+  mutate(m = factor(m, levels = c(5:12, 1:4))) %>%
+  rename(q = qsim) %>%
+  # select(-qobs) %>%
+  bind_rows(df.qobs) %>%
+  mutate(model = factor(model, levels = c("CLSM","SG","FAO","Qobs"))) %>%
+  ggplot(aes(x = m))+
+  geom_boxplot(aes(y = q, color = model), outliers = FALSE)+
+  facet_wrap(.~season, ncol = 1, scales = "free")+
+  scale_x_discrete(breaks = c(5:12, 1:4), labels = month.abb[c(5:12, 1:4)])
+```
+
+```{r}
+ggsave(here("resultados","figs","SUMMARY_STREAMFLOW","boxplot_LTM_streamflow.png"),
+       width = 8, height = 4)
+```
+
+distribution of LTM streamflow, considering the mean of the 100 simulations for each day. There is greater diference in comparison to the previous plot.
+
+```{r}
+# calulo el caudal mensual observado
+df.qobs = df %>% drop_na() %>% 
+  filter(model == "CLSM") %>% 
+  mutate(m = factor(m, levels = c(5:12, 1:4))) %>% 
+  mutate(date = floor_date(date, unit = "months")) %>% 
+  select(date, q = qobs, m, season) %>% 
+  group_by(date, season, m, q) %>% 
+  summarise(q = mean(q)) %>% 
+  mutate(model = "Qobs")
+
+
+# calculamos el caudal simulado mensual de cada modelo y luego mostramos
+# la disrtibucion de las 100 iteraciones con boxplot
+ltm_qdata = df %>% 
+  mutate(date = floor_date(date, unit = "months")) %>%
+  group_by(date, model, season, m) %>%
+  summarise(across(starts_with("qsim"), mean)) %>%
+  pivot_longer(cols = starts_with("qsim"), names_to = "iteration", values_to = "qsim") %>% 
+  mutate(m = factor(m, levels = c(5:12, 1:4))) %>% 
+  rename(q = qsim) %>% 
+  mutate(
+      model = str_c("mHM-",model)
+  ) %>% 
+  # select(-qobs) %>% 
+  bind_rows(df.qobs) %>% 
+  mutate(model = factor(model, levels = c("mHM-CLSM","mHM-SG","mHM-FAO","Qobs")))
+
+ltm_plot = ggplot(ltm_qdata, aes(x = m))+
+  geom_boxplot(aes(y = q, color = model), outliers = FALSE)+
+  facet_wrap(.~season, ncol = 1, scales = "free")+
+  scale_x_discrete(breaks = c(5:12, 1:4), labels = month.abb[c(5:12, 1:4)])+
+  labs(x = "", y = bquote("Streamflow ["*m^-3*s^-1*"]"), 
+       caption = "outliers not shown for display purposes",
+       color = "")
+ 
+ ltm_plot = ltm_plot + scale_color_manual(values = model.color)+ggtitle("LTM streamflow Cauquenes")
+ ltm_plot
+```
+
+```{r eval=FALSE, fig.height=12, fig.width=10, include=FALSE}
+ggsave(here("resultados","figs","SUMMARY_STREAMFLOW","boxplot_LTM_streamflow.png"),
+       width = 8, height = 4, plot = ltm_plot)
+```
+
+
+## Paper Figure 3
+
+```{r fig.height=10, fig.width=10}
+metrics_ltm_plot = ggpubr::ggarrange(ltm_plot, metrics.plot, ncol = 1, heights = c(1,1.2), labels = c("a"))
+metrics_ltm_plot
+```
+
+```{r eval=FALSE, fig.height=12, fig.width=10, include=FALSE}
+ggsave(here("resultados","figs","boxplot_LTM_streamflow.png"),
+       width = 10, height = 10, plot = metrics_ltm_plot)
+ggsave(here("resultados","figs","boxplot_LTM_streamflow.svg"),
+       width = 10, height = 10, plot = metrics_ltm_plot)
+```
+
+## Annual mean streamflow
+
+```{r}
+annual_q = summary_month %>% 
+  mutate(time_year = floor_date(time_month, unit = "year")) %>% 
+  group_by(time_year, model) %>% 
+  summarise(across(where(is.numeric), mean, na.rm=TRUE))
+
+start_year = "1999-01-01"
+end_year = "2023-12-01"
+annual_q %>% 
+  ggplot(aes(x = time_year))+
+  geom_ribbon(aes(ymin = qsim_mean-qsim_sd, ymax = qsim_mean+qsim_sd, fill = model), alpha = 0.4, show.legend = F)+
+  geom_line(aes(y = qsim_mean, color = model), size = 1)+
+  geom_line(aes(y = qobs, color = "Qobs"), size = 1)+
+  scale_x_date(limits = c(ymd(start_year),ymd(end_year)))+
+  # scale_color_manual(name = "Model", values = model.col)+
+  # scale_fill_manual(name = "Model", values = model.col)+
+  labs(x = "", y = bquote("Streamflow ["*m^3*s^-1*"]"), title = "Annual streamflow")
+ggsave(here("RESULTADOS","FIGS","SUMMARY_STREAMFLOW","ANNUAL_STREAMFLOW.PNG"),
+       width = 8, height = 6)
+```
+
+# Streamflow validation (Arrayan)
+
+```{r}
+## Basin Area Calculation
+
+# area de cuencas
+arra_area_m2 = read_sf("G:/mHM/DATA/TABLE/CAUDAL/cau_arrayan/polygon/polygon.shp") %>%
+  st_transform(32718) %>%
+  st_area() %>%
+  as.numeric()
+
+cau_area_m2 = read_sf(
+  here("DATA","SHP","CAUQUENES.SHP")
+) %>% 
+  st_transform(32718) %>% 
+  st_area() %>% 
+  as.numeric()
+```
+
+```{r}
+## Loading and Processing Model Outputs
+
+df1 = read_csv(here("PROC","TABLE", str_c("mhm_output_summary_estfluv_CLSM.csv"))) %>% mutate(model = "CLSM")
+df2 = read_csv(here("PROC","TABLE", str_c("mhm_output_summary_estfluv_SG.csv"))) %>% mutate(model = "SG")
+df3 = read_csv(here("PROC","TABLE", str_c("mhm_output_summary_estfluv_FAO.csv"))) %>% mutate(model = "FAO")
+
+df = bind_rows(df1, df2,df3) %>% mutate(
+  across(
+    where(is.numeric),
+    ~ if_else(
+      sitename == "cau_desem",
+      .x*cau_area_m2/(1000*24*60*60),
+      .x*arra_area_m2/(1000*24*60*60)
+    )
+  )
+)
+
+```
+
+```{r}
+qsim.arra = df %>% 
+  filter(sitename == "cau_arr") %>% 
+  filter(var == "roff") %>% 
+  select(time, model, qsim = mean, sitename)
+
+qarra = read_csv(here("proc","table","Qt_Qb_Cauquenes en arrayan.csv")) %>% 
+  select(time = date, qobs = qt_m3s) %>%
+  mutate(sitename = "cau_arr")
+
+df.qarra = qsim.arra %>% full_join(qarra) %>% drop_na() %>% mutate_season() %>% 
+  mutate(model = str_c("mHM-",model))
+```
+
+```{r}
+metrics.qarra = df.qarra %>% group_by(model, season) %>%
+  do(calculate_error_metrics(.$qobs, .$qsim)) 
+metrics.qarra.re = metrics.qarra %>% filter(season == "Release")
+metrics.qarra.ac = metrics.qarra %>% filter(season == "Accumulation")
+
+df.qarra %>% 
+  filter(season == "Accumulation") %>% 
+  ggplot(aes(x = qobs, y = qsim))+
+  geom_point(alpha = 0.2)+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  metrics.qarra.ac, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(bias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+    ggtitle("Accumulation season - daily streamflow, Arrayan sub-basin")
+
+df.qarra %>% 
+  filter(season == "Release") %>% 
+  ggplot(aes(x = qobs, y = qsim))+
+  geom_point(alpha = 0.2)+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  metrics.qarra.re, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+    ggtitle("Release season - daily streamflow, Arrayan sub-basin")
+```
+
+```{r}
+metrics.qarra = df.qarra %>% group_by(model, season) %>%
+  do(calculate_error_metrics(log(.$qobs, base = 10), log(.$qsim, base = 10)))
+metrics.qarra.re = metrics.qarra %>% filter(season == "Release")
+metrics.qarra.ac = metrics.qarra %>% filter(season == "Accumulation")
+
+df.qarra %>% 
+  filter(season == "Accumulation") %>% 
+  ggplot(aes(x = log(qobs, base = 10), y = log(qsim, base = 10)))+
+  geom_point(alpha = 0.2)+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  metrics.qarra.ac, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+    ggtitle("Accumulation season - log of daily streamflow, Arrayan sub-basin")
+
+df.qarra %>% 
+  filter(season == "Release") %>% 
+  ggplot(aes(x = log(qobs, base = 10), y = log(qsim, base = 10)))+
+  geom_point(alpha = 0.2)+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  metrics.qarra.re, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+    ggtitle("Release season - log of daily streamflow, Arrayan sub-basin")
+```
+
+```{r}
+df.qarra = df.qarra %>% 
+  mutate(time = floor_date(time, unit = "months")) %>% 
+  group_by(time, model, m, season) %>% 
+  summarise(qsim = mean(qsim),
+            qobs = mean(qobs))
+```
+
+```{r}
+metrics.qarra = df.qarra %>% group_by(model, season) %>%
+  do(calculate_error_metrics(.$qobs, .$qsim))
+metrics.qarra.re = metrics.qarra %>% filter(season == "Release")
+metrics.qarra.ac = metrics.qarra %>% filter(season == "Accumulation")
+
+df.qarra %>% 
+  filter(season == "Accumulation") %>% 
+  ggplot(aes(x = qobs, y = qsim))+
+  geom_point()+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  metrics.qarra.ac, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(bias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+    ggtitle("Accumulation season - monthly streamflow, Arrayan sub-basin")
+
+df.qarra %>% 
+  filter(season == "Release") %>% 
+  ggplot(aes(x = qobs, y = qsim))+
+  geom_point()+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  metrics.qarra.re, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+    ggtitle("Release season - monthly streamflow, Arrayan sub-basin")
+```
+
+```{r}
+metrics.qarra = df.qarra %>% group_by(model, season) %>%
+  do(calculate_error_metrics(log(.$qobs, base = 10), log(.$qsim, base = 10)))
+metrics.qarra.re = metrics.qarra %>% filter(season == "Release")
+metrics.qarra.ac = metrics.qarra %>% filter(season == "Accumulation")
+
+df.qarra %>% 
+  filter(season == "Accumulation") %>% 
+  ggplot(aes(x = log(qobs, base = 10), y = log(qsim, base = 10)))+
+  geom_point()+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  metrics.qarra.ac, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+    ggtitle("Accumulation season - log of monthly streamflow, Arrayan sub-basin")
+
+df.qarra %>% 
+  filter(season == "Release") %>% 
+  ggplot(aes(x = log(qobs, base = 10), y = log(qsim, base = 10)))+
+  geom_point()+
+  facet_wrap(.~model)+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_smooth(method = "lm")+
+  geom_text(data =  metrics.qarra.re, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)+
+    ggtitle("Release season - log of monthly streamflow, Arrayan sub-basin")
+```
+
+## Baseflow Monthly Aggregation
+
+```{r}
+df.month = df %>%
+  mutate(time = floor_date(time, unit = "months")) %>%
+  group_by(time, sitename, var, model) %>% 
+  summarise_all(mean)
+
+start_date = "2020-01-01"
+end_date = "2023-12-01"
+ggplot(df.month %>% filter(sitename == "cau_desem"))+
+  geom_line(aes(x = time, y = mean, color = model), size = 1)+
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model, x = time), alpha = 0.4, show.legend = F)+
+  facet_wrap(.~var, scales = "free")+
+  scale_x_date(limits = c(ymd(start_date),ymd(end_date)))
+```
+
+## Long-Term Monthly Baseflow Analysis
+
+```{r fig.height=8, fig.width=10}
+q_ltm = df.month %>% 
+  mutate(m = month(time)) %>% 
+  group_by(m, model, sitename, var) %>% 
+  summarise(across(where(is.numeric), mean, na.rm = TRUE)) %>% 
+  mutate(m = factor(m, levels = c(5:12, 1:4)))
+
+bflow_ltm_plot = q_ltm %>% 
+  filter(sitename == "cau_desem") %>% 
+  ggplot(aes(x = as.numeric(m)))+
+  # facet_wrap(.~var, scales = "free_y")+
+  geom_line(aes(y = mean, color = model), size = 1)+
+  # geom_line(aes(y = qobs, color = "Qobs"), size = 1)+
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.4, show.legend = F)+
+  facet_wrap(.~var, scales = "free")+
+  scale_x_continuous(breaks = 1:12, labels = month.abb[c(5:12, 1:4)])+
+  # scale_color_manual(name = "Model", values = model.col)+
+  # scale_fill_manual(name = "Model", values = model.col)+
+  labs(x = "", y = bquote("Streamflow ["*m^3*s^-1*"]"), title = "LTM monthly baseflow")
+bflow_ltm_plot
+```
+
+```{r eval=FALSE, fig.height=8, fig.width=10, include=FALSE}
+ggsave(here("RESULTADOS","FIGS","SUMMARY_BASEFLOW","LTM_STREAMFLOW.PNG"), width = 8, height = 6,
+       plot = bflow_ltm_plot)
+```
+
+# Base flow validation
+
+## Monthly Baseflow Metrics
+
+```{r}
+
+qarra = read_csv(here("proc","table","Qt_Qb_Cauquenes en arrayan.csv")) %>% 
+  rename(time = date, qobs = qt_m3s) %>%
+  mutate(sitename = "cau_arr")
+names(qarra)[3:7] = str_c("qb_",c(0.9,0.92,0.95,0.98,0.99))
+
+qcau = read_csv(here("proc","table","Qt_Qb_Cauquenes en desembocadura.csv")) %>% 
+  rename(time = date, qobs = qt_m3s) %>% 
+  mutate(sitename = "cau_desem")
+names(qcau)[3:7] = str_c("qb_",c(0.9,0.92,0.95,0.98,0.99))
+
+qarra = qarra %>% 
+  select(time, sitename, Qb = qb_0.9) %>% 
+  mutate(model = "Obs")
+qcau = qcau %>% 
+  select(time, sitename, Qb = qb_0.9) %>% 
+  mutate(model = "Obs")
+
+qb_month = df %>% 
+  select(time, var, model, sitename, mean) %>%
+  pivot_wider(names_from = "var", values_from = "mean") %>%
+  unnest %>% 
+  mutate(Qb = Qb + Qs) %>% 
+  select(time, sitename, model, Qb) %>% 
+  bind_rows(qarra, qcau) %>% 
+  mutate(time = floor_date(time, unit = "months")) %>% 
+  group_by(time, model, sitename) %>% 
+  summarise(Qb = mean(Qb, na.rm = TRUE))
+
+qb_month = mutate_season(qb_month)
+
+sitename.lab = c("cau_arr"= "Arrayan","cau_desem"="Cauquenes")
+qb_month = mutate(qb_month, sitename = sitename.lab[sitename])
+
+qb_month = qb_month %>%
+  pivot_wider(names_from = model, values_from = Qb) %>% 
+  pivot_longer(cols = c(CLSM,SG,FAO), names_to = "model", values_to = "Qb.sim")   %>% 
+  rename(Qb.obs = Obs) %>% 
+  mutate(model = str_c("mHM-",model))
+
+
+metrics = qb_month %>%
+  drop_na() %>% 
+  group_by(sitename, season, model) %>% 
+  do(calculate_error_metrics(.$Qb.obs, .$Qb.sim))
+metrics.ac = metrics %>% filter(season == "Accumulation")
+metrics.re = metrics %>% filter(season == "Release")
+```
+
+### Accumulation
+
+```{r fig.height=3, fig.width=8}
+plot.bflow.ac.ar = qb_month %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(sitename == "Arrayan") %>% 
+  filter(season == "Accumulation") %>% 
+  ggplot(aes(y = Qb.obs, x = Qb.sim))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~model,
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated base + slow flow["*m^3*s^-1*"]"),
+       y = bquote("observed base flow["*m^3*s^-1*"]"),
+       title = "Arrayan sub-basin's baseflow in accumulation season")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.ac %>% filter(sitename == "Arrayan"), aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+plot.bflow.ac.ar
+```
+
+```{r fig.height=3, fig.width=8}
+plot.bflow.re.ar = qb_month %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(sitename == "Arrayan") %>% 
+  filter(season == "Release") %>% 
+  ggplot(aes(y = Qb.obs, x = Qb.sim))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~model,
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated base + slow flow["*m^3*s^-1*"]"),
+       y = bquote("observed base flow["*m^3*s^-1*"]"),
+       title = "Arrayan sub-basin's baseflow in release season")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.re %>% filter(sitename == "Arrayan"), aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+plot.bflow.re.ar
+```
+```{r fig.height=3, fig.width=8}
+plot.bflow.ac.cau = qb_month %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(sitename == "Cauquenes") %>% 
+  filter(season == "Accumulation") %>% 
+  ggplot(aes(y = Qb.obs, x = Qb.sim))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~model,
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated base + slow flow["*m^3*s^-1*"]"),
+       y = bquote("observed base flow["*m^3*s^-1*"]"),
+       title = "Cauquenes basin's baseflow in accumulation season")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.ac %>% filter(sitename == "Cauquenes"), aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+plot.bflow.ac.cau
+```
+
+```{r fig.height=3, fig.width=8}
+plot.bflow.re.cau = qb_month %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(sitename == "Cauquenes") %>% 
+  filter(season == "Release") %>% 
+  ggplot(aes(y = Qb.obs, x = Qb.sim))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~model,
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated base + slow flow["*m^3*s^-1*"]"),
+       y = bquote("observed base flow["*m^3*s^-1*"]"),
+       title = "Cauquenes basin's baseflow in release season")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.re %>% filter(sitename == "Cauquenes"), aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+plot.bflow.re.cau
+```
+
+
+```{r fig.height=8, fig.width=8}
+qb_month %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(season == "Accumulation") %>% 
+  ggplot(aes(y = Qb.obs, x = Qb.sim))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~sitename+model,
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated base + slow flow["*m^3*s^-1*"]"),
+       y = bquote("observed base flow["*m^3*s^-1*"]"),
+       caption = "Accumulation season; alpha = 0.9")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.ac, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+```
+
+### Release
+
+```{r fig.height=8, fig.width=8}
+qb_month %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(season == "Release") %>% 
+  ggplot(aes(y = Qb.obs, x = Qb.sim))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~sitename+model, 
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated base + slow flow["*m^3*s^-1*"]"),
+       y = bquote("observed base flow["*m^3*s^-1*"]"),
+       caption = "Release season; alpha = 0.9")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.re, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+```
+
+```{r}
+metrics = qb_month %>%
+  drop_na() %>% 
+  group_by(sitename, season, model) %>% 
+  do(calculate_error_metrics(log(.$Qb.obs+0.001, base = 10), log(.$Qb.sim+0.001, base = 10)))
+metrics.ac = metrics %>% filter(season == "Accumulation")
+metrics.re = metrics %>% filter(season == "Release")
+```
+
+### Accumulation (log scale)
+
+```{r fig.height=8, fig.width=8}
+qb_month %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(season == "Accumulation") %>% 
+  ggplot(aes(y = log(Qb.obs, base = 10), x = log(Qb.sim, base = 10)))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~sitename+model,
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated log(base + slow flow ["*m^3*s^-1*"])"),
+       y = bquote("observed log(base flow ["*m^3*s^-1*"])"),
+       caption = "Accumulation season; alpha = 0.9")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.ac, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+```
+
+### Release (log scale)
+
+```{r fig.height=8, fig.width=8}
+qb_month %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(season == "Release") %>% 
+  ggplot(aes(y = log(Qb.obs, base = 10), x = log(Qb.sim, base = 10)))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~sitename+model, 
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated log(base + slow flow ["*m^3*s^-1*"])"),
+       y = bquote("observed log(base flow ["*m^3*s^-1*"])"),
+       caption = "Accumulation season; alpha = 0.9")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.re, aes(
+    x = Inf, 
+    y = -Inf,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+```
+
+## Daily Baseflow Metrics
+
+```{r}
+qb_day = df %>% 
+  select(time, var, model, sitename, mean) %>% 
+  pivot_wider(names_from = "var", values_from = "mean") %>%
+  unnest %>% 
+  mutate(Qb = Qb + Qs) %>% 
+  select(time, sitename, model, Qb) %>% 
+  bind_rows(qarra, qcau)
+
+qb_day = mutate_season(qb_day)
+qb_month = mutate(qb_month, sitename = sitename.lab[sitename])
+
+qb_day = qb_day %>%
+  pivot_wider(names_from = model, values_from = Qb) %>% 
+  pivot_longer(cols = c(CLSM,SG,FAO), names_to = "model", values_to = "Qb.sim")   %>% 
+  rename(Qb.obs = Obs) %>% 
+  mutate(model = str_c("mHM-",model))
+
+metrics = qb_day %>%
+  drop_na() %>% 
+  group_by(sitename, season, model) %>% 
+  do(calculate_error_metrics(.$Qb.obs, .$Qb.sim))
+metrics.ac = metrics %>% filter(season == "Accumulation")
+metrics.re = metrics %>% filter(season == "Release")
+```
+
+### Accumulation
+
+```{r}
+plot.bflow.ac.ar = qb_day %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(season == "Accumulation") %>% 
+  filter(sitename == "cau_arr") %>% 
+  ggplot(aes(y = Qb.obs, x = Qb.sim))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~model, 
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated base + slow flow["*m^3*s^-1*"]"),
+       y = bquote("observed base flow["*m^3*s^-1*"]"),
+       caption = "Accumulation season; alpha = 0.9")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.ac %>% filter(sitename == "cau_arr"), aes(
+    x = Inf, 
+    y = 60,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+plot.bflow.ac.ar
+```
+```{r}
+plot.bflow.ac.cau = qb_day %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(season == "Accumulation") %>% 
+  filter(sitename == "cau_desem") %>% 
+  ggplot(aes(y = Qb.obs, x = Qb.sim))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~model, 
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated base + slow flow["*m^3*s^-1*"]"),
+       y = bquote("observed base flow["*m^3*s^-1*"]"),
+       caption = "Accumulation season; alpha = 0.9")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.ac %>% filter(sitename == "cau_desem"), aes(
+    x = Inf, 
+    y = 120,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+plot.bflow.ac.cau
+```
+
+### Release
+
+```{r}
+plot.bflow.re.ar = qb_day %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(season == "Release") %>%
+  filter(sitename == "cau_arr") %>% 
+  ggplot(aes(y = Qb.obs, x = Qb.sim))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~model, 
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated base + slow flow["*m^3*s^-1*"]"),
+       y = bquote("observed base flow["*m^3*s^-1*"]"),
+       caption = "Release season; alpha = 0.9")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.re %>% filter(sitename == "cau_arr"), aes(
+    x = Inf, 
+    y = 6,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+plot.bflow.re.ar
+```
+
+```{r}
+plot.bflow.re.cau = qb_day %>% 
+  # filter(alpha == "qb_0.9") %>%
+  filter(season == "Release") %>%
+  filter(sitename == "cau_desem") %>% 
+  ggplot(aes(y = Qb.obs, x = Qb.sim))+
+  geom_point(alpha = .4)+
+  geom_smooth(method = "lm")+
+  # ggpubr::stat_cor(aes(y = Qb.obs, x = Qb.sim, label = after_stat(rr.label)))+
+  facet_wrap(
+    .~model, 
+    # nrow = 2, 
+    # scale = "free"
+  )+
+  labs(x = bquote("simulated base + slow flow["*m^3*s^-1*"]"),
+       y = bquote("observed base flow["*m^3*s^-1*"]"),
+       caption = "Release season; alpha = 0.9")+
+  tune::coord_obs_pred()+
+  geom_abline(color = "red")+
+  geom_text(data = metrics.re %>% filter(sitename == "cau_desem"), aes(
+    x = Inf, 
+    y = 10,
+    label = paste0("KGE: ",round(kge,2), "\nRMSE: ", round(rmse,2), "\nPBIAS: ", round(pbias,2))
+  ), 
+  hjust = 1.1, vjust = -0.5, size = 3.5, color = "blue", inherit.aes = FALSE)
+plot.bflow.re.cau
+```
+
+### Paper figure 4
+
+```{r fig.height=6, fig.width=12}
+plot.bflow.ar = ggpubr::ggarrange(plot.bflow.ac.ar, plot.bflow.re.ar, ncol = 2,
+                                  labels = c("c","d"))
+plot.bflow.cau = ggpubr::ggarrange(plot.bflow.ac.cau, plot.bflow.re.cau, ncol = 2,
+                                   labels = c("a","b"))
+plot.bflow = ggpubr::ggarrange(plot.bflow.cau, plot.bflow.ar, ncol = 1)
+plot.bflow
+```
+
+
+```{r fig.height=6, fig.width=12}
+ggsave(here("resultados","figs","plot_baseflow.svg"),
+       width = 12, height = 6, plot = plot.bflow)
+ggsave(here("resultados","figs","plot_baseflow.png"),
+       width = 12, height = 6, plot = plot.bflow)
+```
+
+# Soil moisture validation
+
+```{r}
+datasm_probes = read_csv(here("PROC","TABLE","daily_sim_obs_sm_2layers.csv"))
+cal_probes = c("PINO-SANPEDRO","PINO-LAGRANJA","MAT-LAGRANJA",
+              "MAT-SASB","PINO-SASB","PINO-GRANIER","BN-METAMORFICO",
+              "BN-PLAYABLANCA","MAT-INIA")
+datasm_probes = datasm_probes %>% filter(sitename %in% cal_probes)
+datasm_month = read_csv(here("PROC","TABLE","monthly_sim_obs_sm_2layers.csv"))
+
+```
+
+
+```{r}
+datasm_diviner = read_csv(here("PROC","TABLE","daily_sim_obs_sm_diviner_2layers.csv")) %>% 
+  mutate(layer = if_else(layer == "L1",1,2))
+
+datasm = datasm_probes %>% bind_rows(datasm_diviner)
+```
+
+Sitios que no se consideran porque tienen menos de 10 datos por layer. Es decir, se midieron menos de 10 fechas. Los sistios corresponden exclusivamente a sitios con Diviner.
+
+```{r}
+sites_not_considered = datasm %>% group_by(sitename, model, layer) %>% summarise(n = n()) %>% 
+  filter(n < 10) %>% 
+  pull(sitename) %>% 
+  unique
+sites_not_considered
+```
+
+Sitios que si cumplen el filtro de mas de 10 datos por layer:
+
+```{r}
+sites_considered = datasm %>% group_by(sitename, model, layer) %>% summarise(n = n()) %>% 
+  filter(n >= 10) %>% 
+  pull(sitename) %>% 
+  unique
+sites_considered
+```
+
+Filtramos BN-QUIRIHUE porque se encuentra fuera de la cuenca. MAT-BERARDO y MAT-SAN-AGUSTIN porque son sitios con presencia de napas que no se pueden simular con mHM.
+
+```{r}
+datasm = datasm %>% filter(sitename %in% sites_considered) %>% 
+  # filter(sitename %in% cal_probes) %>% 
+  filter(sitename != "BN-QUIRIHUE",
+         sitename != "MAT-BERARDO",
+         sitename != "MAT-SAN-AGUSTIN")
+```
+
+Cantidad de datos observados para cada season y layer
+
+```{r}
+datasm %>% filter(model %in% c("Obs","CLSM")) %>% 
+  group_by(season, layer, model) %>% 
+  summarise(n = n())
+
+datasm %>% filter(model %in% c("Obs","CLSM")) %>% 
+  group_by(layer, model) %>% 
+  summarise(n = n())
+```
+
+Table with statistics for SM values. This is a detailed view of the boxplots.
+
+```{r}
+datasm_summary = datasm %>% 
+  mutate(model = if_else(model != "Obs", str_c("mHM-",model), model)) %>% 
+  mutate(model = factor(model, levels = c("mHM-CLSM","mHM-FAO","mHM-SG","Obs"))) %>% 
+  group_by(model, season, layer) %>% 
+  summarise(
+    min_sm = min(mean, na.rm = T),
+    q25_sm = quantile(mean, 0.25, na.rm = T),
+    mean_sm = mean(mean, na.rm = T),
+    median_sm = median(mean, na.rm = T),
+    q75_sm = quantile(mean, 0.75, na.rm = T),
+    max_sm = max(mean, na.rm = T),
+    IQR_sm = IQR(mean, na.rm = T)
+  ) %>% 
+  arrange(season, layer) %>% 
+  mutate(across(where(is.numeric), ~round(.x, digits = 2)))
+datasm_summary
+```
+
+
+```{r eval=FALSE, include=FALSE}
+write_csv(datasm_summary, file = here("RESULTADOS","TABLE","data_sm_boxplot_summary.CSV"))
+```
+
+## Daily Soil Moisture Distribution
+
+### Paper Figure 5
+
+```{r}
+day_sm_plot = datasm %>% 
+  mutate(model = if_else(model != "Obs", str_c("mHM-",model), model)) %>% 
+  mutate(model = factor(model, levels = c("mHM-CLSM","mHM-FAO","mHM-SG","Obs"))) %>% 
+  ggplot(aes(y = factor(layer, levels = c(2,1))))+
+  geom_boxplot(aes(x = mean, color = model, linetype = season), outliers = TRUE)+
+  scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "Daily soil moisture [v/v]")+
+  ggtitle("Distribution of daily soil moisture")+
+  scale_color_manual(values = model.color, name = "", labels = c("Obs"="SM.obs","mHM-SG","mHM-FAO","mHM-CLSM"),
+                     breaks = c("Obs","mHM-SG","mHM-FAO","mHM-CLSM"))+
+  scale_linetype_discrete(breaks = c("Release","Accumulation"))
+day_sm_plot
+```
+
+
+```{r fig.height=6, fig.width=10}
+day_sm_plot_probes = datasm_probes %>% 
+  mutate(model = if_else(model != "Obs", str_c("mHM-",model), model)) %>% 
+  mutate(model = factor(model, levels = c("mHM-CLSM","mHM-FAO","mHM-SG","Obs"))) %>% 
+  ggplot(aes(y = factor(layer, levels = c(2,1))))+
+  geom_boxplot(aes(x = mean, color = model, linetype = season), outliers = TRUE)+
+  scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "Daily soil moisture [v/v]")+
+  ggtitle("Soil moisture probes values distribution")+
+  scale_color_manual(values = model.color, name = "", labels = c("Obs"="SM.obs","mHM-SG","mHM-FAO","mHM-CLSM"),
+                     breaks = c("Obs","mHM-SG","mHM-FAO","mHM-CLSM"))+
+  scale_linetype_discrete(breaks = c("Release","Accumulation"))
+day_sm_plot_probes
+```
+
+```{r eval=FALSE, include=FALSE}
+fname = str_c("Daily","SWC","distribution",".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS",'SOIL MOISTURE VALIDATION',fname), plot = day_sm_plot,
+       width = 10, height = 6)
+fname = str_c("Daily","SWC","distribution",".svg", sep = "_")
+ggsave(here("RESULTADOS","FIGS",'SOIL MOISTURE VALIDATION',fname), plot = day_sm_plot,
+       width = 10, height = 6)
+```
+
+```{r fig.height=8, fig.width=10}
+datasm %>% 
+  mutate(model = if_else(model != "Obs", str_c("mHM-",model), model)) %>% 
+  mutate(model = factor(model, levels = c("mHM-CLSM","mHM-FAO","mHM-SG","Obs"))) %>% 
+  ggplot()+
+  geom_density(aes(x = mean, color = model))+
+  facet_wrap(.~layer+season, 
+             labeller = as_labeller(c("1"="0-100 [cm]","2"="100-200 [cm]",
+                                      "Accumulation"="Accumulation", "Release"="Release")),
+             ncol = 2,
+             scales = "free_y")+
+  # scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "Daily soil moisture [v/v]")+
+  ggtitle("Distribution of daily soil moisture")+
+  scale_color_manual(values = model.color, name = "",
+                     labels = c("Obs"="SM.obs","mHM-SG","mHM-FAO","mHM-CLSM"),
+                     breaks = c("Obs","mHM-SG","mHM-FAO","mHM-CLSM"))
+```
+
+## Daily Metrics
+
+```{r}
+metrics = datasm %>%
+  filter(!is.na(mean)) %>% 
+  select(time, sitename, layer, season, model, mean) %>% 
+  pivot_wider(names_from = "model", values_from = "mean") %>% 
+  pivot_longer(cols = CLSM:SG, names_to = "model", values_to = "swc_sim") %>% 
+  rename(swc_obs = Obs) %>% 
+  unnest() %>% 
+  filter(!is.na(swc_obs)) %>% 
+  filter(!is.na(swc_sim)) %>%
+  group_by(sitename, model, layer, season) %>% 
+  do(calculate_error_metrics(.$swc_obs, .$swc_sim)) %>% 
+  mutate(model = str_c("mHM-",model))
+
+metrics_probes = datasm_probes %>%
+  filter(!is.na(mean)) %>% 
+  select(time, sitename, layer, season, model, mean) %>% 
+  pivot_wider(names_from = "model", values_from = "mean") %>% 
+  pivot_longer(cols = CLSM:SG, names_to = "model", values_to = "swc_sim") %>% 
+  rename(swc_obs = Obs) %>% 
+  unnest() %>% 
+  filter(!is.na(swc_obs)) %>% 
+  filter(!is.na(swc_sim)) %>%
+  group_by(sitename, model, layer, season) %>% 
+  do(calculate_error_metrics(.$swc_obs, .$swc_sim)) %>% 
+  mutate(model = str_c("mHM-",model))
+```
+
+```{r}
+cor.plot = metrics %>% 
+  ggplot(aes(y = factor(layer, levels = c(2,1)), x = correlation, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5)+
+  scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "correlation")+
+  scale_color_discrete(type = model.color, name = "", breaks = c("mHM-SG","mHM-FAO","mHM-CLSM"))
+cor.plot+ggtitle("Correlation of daily values")
+```
+
+
+```{r}
+cor.plot_probes = metrics_probes %>% 
+  ggplot(aes(y = factor(layer, levels = c(2,1)), x = correlation, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5)+
+  scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "correlation")+
+  scale_color_discrete(type = model.color, name = "", breaks = c("mHM-SG","mHM-FAO","mHM-CLSM"))
+cor.plot_probes+ggtitle("Correlation of daily values (only probes)")
+
+```
+
+```{r eval=FALSE, include=FALSE}
+fname = str_c("daily","SM","correlation",".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS",'SOIL MOISTURE VALIDATION',fname), plot = cor.plot)
+```
+
+```{r}
+bias.plot = metrics %>% 
+  ggplot(aes(y = factor(layer, levels = c(2,1)), x = bias, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5)+
+  scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "Bias [v/v]")+
+  scale_color_discrete(type = model.color, name = "", breaks = c("mHM-SG","mHM-FAO","mHM-CLSM"))
+
+bias.plot+ggtitle("Bias of daily values")
+
+```
+```{r}
+bias.plot_probes = metrics_probes %>% 
+  ggplot(aes(y = factor(layer, levels = c(2,1)), x = bias, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5)+
+  scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "Bias [v/v]")+
+  scale_color_discrete(type = model.color, name = "", breaks = c("mHM-SG","mHM-FAO","mHM-CLSM"))
+
+bias.plot_probes+ggtitle("Bias of daily values (only probes)")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+fname = str_c("daily","SM","bias",".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS",'SOIL MOISTURE VALIDATION',fname), plot = bias.plot)
+```
+
+```{r}
+ubrmse.plot = metrics %>% 
+  ggplot(aes(y = factor(layer, levels = c(2,1)), x = ubrmse, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5)+
+  scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "ubRMSE [v/v]")+
+  scale_color_discrete(type = model.color, name = "", breaks = c("mHM-SG","mHM-FAO","mHM-CLSM"))
+ubrmse.plot+ggtitle("ubRMSE of daily values")
+
+```
+
+```{r}
+ubrmse.plot_probes = metrics_probes %>% 
+  ggplot(aes(y = factor(layer, levels = c(2,1)), x = ubrmse, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5)+
+  scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "ubRMSE [v/v]")+
+  scale_color_discrete(type = model.color, name = "", breaks = c("mHM-SG","mHM-FAO","mHM-CLSM"))
+ubrmse.plot_probes+ggtitle("ubRMSE of daily values (only probes)")
+```
+
+```{r eval=FALSE, include=FALSE}
+fname = str_c("daily","SM","ubrmse",".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS",'SOIL MOISTURE VALIDATION',fname), plot = ubrmse.plot)
+```
+
+### Paper Figure 6
+
+```{r fig.height=8, fig.width=8}
+metrics.day.sm = ggpubr::ggarrange(cor.plot, bias.plot, ubrmse.plot, ncol = 1, labels = c("a","b","c"))
+metrics.day.sm
+```
+```{r}
+ggsave(here("Resultados","figs","soil moisture validation","daily_metrics_sm.png"), height = 8, width = 8, plot = metrics.day.sm)
+ggsave(here("Resultados","figs","soil moisture validation","daily_metrics_sm.svg"), height = 8, width = 8, plot = metrics.day.sm)
+```
+
+
+## Monthly Metrics
+
+```{r}
+metrics = datasm_month %>% 
+  select(time_month, sitename, layer, season, model, mean) %>% 
+  pivot_wider(names_from = "model", values_from = "mean") %>% 
+  pivot_longer(cols = CLSM:SG, names_to = "model", values_to = "swc_sim") %>% 
+  rename(swc_obs = Obs) %>% 
+  filter(!is.na(swc_obs)) %>% 
+  filter(!is.na(swc_sim)) %>% 
+  group_by(sitename, model, layer, season) %>% 
+  do(calculate_error_metrics(.$swc_obs, .$swc_sim))
+```
+
+```{r}
+cor.plot = metrics %>% 
+  ggplot(aes(y = factor(layer, levels = c(2,1)), x = correlation, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5)+
+  scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "correlation")+
+  ggtitle("Correlation of monthly values")
+```
+
+```{r eval=FALSE, include=FALSE}
+fname = str_c("monthly","SM","correlation",".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS",'SOIL MOISTURE VALIDATION',fname), plot = cor.plot)
+```
+
+```{r}
+bias.plot = metrics %>% 
+  ggplot(aes(y = factor(layer, levels = c(2,1)), x = bias, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5)+
+  scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "Bias [v/v]")+
+  ggtitle("Bias of monthly values")
+```
+
+```{r eval=FALSE, include=FALSE}
+fname = str_c("monthly","SM","bias",".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS",'SOIL MOISTURE VALIDATION',fname), plot = bias.plot)
+```
+
+```{r}
+ubrmse.plot = metrics %>% 
+  ggplot(aes(y = factor(layer, levels = c(2,1)), x = ubrmse, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5)+
+  scale_y_discrete(breaks = c("1","2"), labels = c("0-100","100-200"), name = "Soil layer [cm]")+
+  scale_x_continuous(name = "ubRMSE [v/v]")+
+  ggtitle("ubRMSE of monthly values")
+```
+
+```{r eval=FALSE, include=FALSE}
+fname = str_c("monthly","SM","ubrmse",".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS",'SOIL MOISTURE VALIDATION',fname), plot = ubrmse.plot)
+```
+
+# Basin mean Soil moisture and aET
+
+```{r}
+df1 = read_csv(here("PROC","TABLE", str_c("mhm_output_summary_basin_mean_CLSM.csv"))) %>%
+  mutate(model = "mHM-CLSM")
+df2 = read_csv(here("PROC","TABLE", str_c("mhm_output_summary_basin_mean_SG.csv"))) %>% 
+  mutate(model = "mHM-SG")
+df3 = read_csv(here("PROC","TABLE", str_c("mhm_output_summary_basin_mean_FAO.csv"))) %>%
+  mutate(model = "mHM-FAO")
+
+df = bind_rows(df1, df2, df3)
+
+start_date = "2020-01-01"
+end_date = "2023-12-01"
+start_year = "1965-01-01"
+end_year = "2023-12-01"
+```
+```{r}
+df1 = read_csv(here("PROC","TABLE", str_c("mhm_output_summary_basin_mean_CLSM_2layers.csv"))) %>%
+  mutate(model = "mHM-CLSM")
+df2 = read_csv(here("PROC","TABLE", str_c("mhm_output_summary_basin_mean_SG_2layers.csv"))) %>% 
+  mutate(model = "mHM-SG")
+df3 = read_csv(here("PROC","TABLE", str_c("mhm_output_summary_basin_mean_FAO_2layers.csv"))) %>%
+  mutate(model = "mHM-FAO")
+
+df = bind_rows(df1, df2, df3)
+
+start_date = "2020-01-01"
+end_date = "2023-12-01"
+start_year = "1965-01-01"
+end_year = "2023-12-01"
+```
+
+
+## aET Monthly Aggregation
+
+```{r}
+monthly_sum = df %>% 
+  filter(str_detect(var, "aET")) %>% 
+  mutate(time_month = floor_date(time, unit = "month")) %>% 
+  group_by(time_month, var, model) %>% 
+  summarise(across(where(is.numeric), sum))
+
+monthly_sum %>% 
+  ggplot(aes(x = time_month)) +
+  facet_wrap(.~var, scales = "free_y") +
+  geom_line(aes(y = mean, color = model)) +
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.4) +
+  scale_x_date(limits = c(ymd(start_date), ymd(end_date)))
+```
+
+
+```{r eval=FALSE, include=FALSE}
+fname = str_c("monthly", "aET", start_date, end_date, ".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS","COMPARISON_SUMMARY_AET_SWC", fname), width = 10, height = 8)
+```
+
+## aET Long-Term Monthly Mean
+
+```{r fig.height=4, fig.width=10}
+monthly_ltm = monthly_sum %>% 
+  mutate(m = month(time_month)) %>% 
+  group_by(m, var, model) %>% 
+  select(aet = mean) %>% 
+  summarise(mean = mean(aet),
+            sd = sd(aet, na.rm = TRUE)) %>% 
+  mutate(m = factor(m, levels = c(5:12, 1:4)))
+
+plot.ltm.aet = ggplot(monthly_ltm, aes(x = as.numeric(m))) +
+  facet_wrap(.~var, scales = "free_y", labeller = as_labeller(c("aET_L1"="0-100 cm", "aET_L2"="100-200 cm"))) +
+  geom_line(aes(y = mean, color = model), linewidth = 0.8) +
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb[c(5:12, 1:4)]) +
+  labs(x= "", y = "aET [mm]", title = str_c("LTM monthly aET across 100 calibration runs"),
+       caption = "The ribbon represents the [mean-sd, mean+sd] range")+
+  scale_color_discrete(type = model.color, name = "")+
+  scale_fill_discrete(type = model.color, name = "")
+plot.ltm.aet
+```
+
+## aET LTM (boxplot)
+
+```{r}
+df1 = read_csv(here("PROC","TABLE", str_c("mhm_output_basin_mean_monthly_CLSM_2layers.csv"))) %>%
+  mutate(model = "mHM-CLSM")
+df2 = read_csv(here("PROC","TABLE", str_c("mhm_output_basin_mean_monthly_SG_2layers.csv"))) %>% 
+  mutate(model = "mHM-SG")
+df3 = read_csv(here("PROC","TABLE", str_c("mhm_output_basin_mean_monthly_FAO_2layers.csv"))) %>%
+  mutate(model = "mHM-FAO")
+
+df2 = bind_rows(df1, df2, df3) %>% pivot_longer(cols = aET_L1:swc_L2, names_to = "var")
+aet.df = df2 %>% 
+  filter(str_detect(var, "aET"))%>% 
+  mutate(m = month(time),
+         m = factor(m, levels = c(5:12, 1:4)))
+boxplot.aet = ggplot(aet.df, aes(x = m)) +
+  facet_wrap(.~var, scales = "free_y", labeller = as_labeller(c("aET_L1"="0-100 cm", "aET_L2"="100-200 cm")), ncol = 1) +
+  geom_boxplot(aes(y = value, color = model), outliers = FALSE) +
+  # geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3) +
+  scale_x_discrete(breaks = 1:12, labels = month.abb) +
+  labs(x= "", y = "aET [mm]")+
+  ggtitle("Monthly aET across 100 calibration runs")+
+  scale_color_discrete(type = model.color, name = "")+
+  scale_fill_discrete(type = model.color, name = "")
+boxplot.aet
+```
+
+```{r}
+aet.df.mean = aet.df %>% 
+  group_by(time, model, var, m) %>%
+  summarise(value = mean(value))
+
+boxplot.aet.mean = ggplot(aet.df.mean, aes(x = m)) +
+  facet_wrap(.~var, scales = "free_y", labeller = as_labeller(c("aET_L1"="0-100 cm", "aET_L2"="100-200 cm")), ncol = 1) +
+  geom_boxplot(aes(y = value, color = model), outliers = FALSE) +
+  # geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3) +
+  scale_x_discrete(breaks = 1:12, labels = month.abb) +
+  labs(x= "", y = "aET [mm]", title = str_c("Monthly aET average across 100 calibration runs"),
+       caption = "The ribbon represents the [mean-sd, mean+sd] range")+
+  scale_color_discrete(type = model.color, name = "")+
+  scale_fill_discrete(type = model.color, name = "")
+boxplot.aet.mean
+```
+```{r}
+aet.df.ltm = aet.df %>% 
+  group_by(model.it, var, m) %>%
+  summarise(value = mean(value)) %>% 
+  mutate(model = if_else(str_detect(model.it, "CLSM"), "CLSM",
+                         if_else(str_detect(model.it, "FAO"), "FAO", "SG"))) %>% 
+  mutate(model = str_c("mHM-",model))
+
+boxplot.ltm.aet = ggplot(aet.df.ltm, aes(x = m)) +
+  facet_wrap(.~var, scales = "free_y", labeller = as_labeller(c("aET_L1"="0-100 cm", "aET_L2"="100-200 cm")), ncol = 1) +
+  geom_boxplot(aes(y = value, color = model), outliers = FALSE) +
+  # geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3) +
+  scale_x_discrete(breaks = 1:12, labels = month.abb) +
+  labs(x= "", y = "aET [mm]")+
+  # ggtitle("Long-term mean aET across 100 calibration runs")
+  scale_color_discrete(type = model.color, name = "")+
+  scale_fill_discrete(type = model.color, name = "")
+boxplot.ltm.aet
+```
+
+
+```{r eval=FALSE, fig.height=8, fig.width=12, include=FALSE}
+fname = str_c("LTM", "monthly", "aET", ".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS","COMPARISON_SUMMARY_AET_SWC", fname), width = 10, height = 8)
+```
+
+## aET Annual Aggregation and Visualization
+
+```{r}
+yearly_sum = monthly_sum %>% 
+  mutate(time_year = floor_date(time_month, unit = "year")) %>% 
+  group_by(time_year, var, model) %>% 
+  summarise(across(where(is.numeric), sum))
+
+
+yearly_sum %>% 
+  ggplot(aes(x = time_year)) +
+  facet_wrap(.~var, scales = "free_y") +
+  geom_line(aes(y = mean, color = model)) +
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3) +
+  scale_x_date(limits = c(ymd(start_year), ymd(end_year))) +
+  labs(x= "", y = "aET [mm]", title = str_c("Annual aET across 100 calibration runs"),
+       caption = "The ribbon represents the [mean-sd, mean+sd] range")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+fname = str_c("yearly", "bylayer", "aET", ".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS","COMPARISON_SUMMARY_AET_SWC", fname), width = 10, height = 8)
+```
+
+```{r}
+yearly_sum %>%
+  group_by(time_year, model) %>% 
+  summarise(across(where(is.numeric), sum)) %>% 
+  ggplot(aes(x = time_year))+
+  # facet_wrap(.~var, scales = "free_y")+
+  geom_line(aes(y = mean, color = model))+
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3)+
+  scale_x_date(limits = c(ymd(start_year),ymd(end_year)))+
+  labs(x= "",y = "aET [mm]", title = str_c("Annual aET of entire soil profile across 100 calibration runs"),
+       caption = "The ribbon represents the [mean-sd, mean+sd] range")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+fname = str_c("yearly","aET",".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS",'COMPARISON_SUMMARY_AET_SWC',fname), width = 10, height = 8)
+```
+
+## SWC Monthly Aggregation and Visualization
+
+```{r}
+monthly_sum = df %>% 
+  filter(str_detect(var, "swc")) %>% 
+  mutate(time_month = floor_date(time, unit = "month")) %>% 
+  group_by(time_month, var, model) %>% 
+  summarise(across(where(is.numeric), mean))
+
+monthly_sum %>% 
+  ggplot(aes(x = time_month)) +
+  facet_wrap(.~var, scales = "free_y") +
+  geom_line(aes(y = mean, color = model)) +
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3) +
+  scale_x_date(limits = c(ymd(start_date), ymd(end_date)))
+fname = str_c("monthly", "SWC", start_date, end_date, ".png", sep = "_")
+# ggsave(here("RESULTADOS","FIGS","COMPARISON_SUMMARY_AET_SWC", fname), width = 10, height = 8)
+```
+
+## SWC Long-Term Monthly Mean
+
+```{r fig.height=4, fig.width=10}
+monthly_ltm = monthly_sum %>% 
+  mutate(m = month(time_month)) %>% 
+  group_by(m, var, model) %>% 
+    select(swc = mean) %>% 
+  summarise(mean = mean(swc),
+            sd = sd(swc, na.rm = TRUE)) %>% 
+  mutate(m = factor(m, levels = c(5:12, 1:4)))
+
+plot.ltm.swc = ggplot(monthly_ltm, aes(x = as.numeric(m))) +
+  facet_wrap(.~var, scales = "free_y", labeller = as_labeller(c("swc_L1"="0-100 cm", "swc_L2"="100-200 cm"))) +  geom_line(aes(y = mean, color = model)) +
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb[c(5:12, 1:4)]) +
+  labs(x= "", y = "SWC [mm]", title = str_c("LTM monthly SWC across 100 calibration runs"),
+       caption = "The ribbon represents the [mean-sd, mean+sd] range")+
+  scale_color_discrete(type = model.color, name = "")+
+  scale_fill_discrete(type = model.color, name = "")
+plot.ltm.swc
+```
+
+
+```{r fig.height=8, fig.width=12}
+fname = str_c("LTM", "monthly", "SWC", ".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS","COMPARISON_SUMMARY_AET_SWC", fname), width = 10, height = 8)
+```
+
+## SWC LTM (boxplot)
+
+```{r}
+swc.df = df2 %>% 
+  filter(str_detect(var, "swc"))%>% 
+  mutate(m = month(time),
+         m = factor(m, levels = c(5:12, 1:4)))
+swc.df
+boxplot.swc = ggplot(swc.df, aes(x = m)) +
+  facet_wrap(.~var, scales = "free_y", labeller = as_labeller(c("swc_L1"="0-100 cm", "swc_L2"="100-200 cm")), ncol = 1) +
+  geom_boxplot(aes(y = value, color = model), outliers = FALSE) +
+  # geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3) +
+  scale_x_discrete(breaks = 1:12, labels = month.abb) +
+  labs(x= "", y = "SWC [mm]", title = str_c("Monthly SWC across 100 calibration runs"),
+       caption = "The ribbon represents the [mean-sd, mean+sd] range")+
+  scale_color_discrete(type = model.color, name = "")+
+  scale_fill_discrete(type = model.color, name = "")
+boxplot.swc
+```
+
+```{r}
+swc.df.mean = swc.df %>% 
+  group_by(time, model, var, m) %>%
+  summarise(value = mean(value))
+
+boxplot.swc.mean = ggplot(swc.df.mean, aes(x = m)) +
+  facet_wrap(.~var, scales = "free_y", labeller = as_labeller(c("swc_L1"="0-100 cm", "swc_L2"="100-200 cm")), ncol = 1) +
+  geom_boxplot(aes(y = value, color = model), outliers = FALSE) +
+  # geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3) +
+  scale_x_discrete(breaks = 1:12, labels = month.abb) +
+  labs(x= "", y = "aET [mm]", title = str_c("Monthly SWC average across 100 calibration runs"),
+       caption = "The ribbon represents the [mean-sd, mean+sd] range")+
+  scale_color_discrete(type = model.color, name = "")+
+  scale_fill_discrete(type = model.color, name = "")
+boxplot.swc.mean
+```
+```{r}
+swc.df.ltm = swc.df %>% 
+  group_by(model.it, var, m) %>%
+  summarise(value = mean(value)) %>% 
+  mutate(model = if_else(str_detect(model.it, "CLSM"), "CLSM",
+                         if_else(str_detect(model.it, "FAO"), "FAO", "SG"))) %>% 
+  mutate(model = str_c("mHM-",model))
+
+boxplot.ltm.swc = ggplot(swc.df.ltm, aes(x = m)) +
+  facet_wrap(.~var, scales = "free_y", labeller = as_labeller(c("swc_L1"="0-100 cm", "swc_L2"="100-200 cm")), ncol = 1) +
+  geom_boxplot(aes(y = value, color = model), outliers = FALSE) +
+  # geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3) +
+  scale_x_discrete(breaks = 1:12, labels = month.abb) +
+  labs(x= "", y = "SWC [mm]")+
+  # ggtitle("Long-term mean SWC across 100 calibration runs")+
+  scale_color_discrete(type = model.color, name = "")+
+  scale_fill_discrete(type = model.color, name = "")
+boxplot.ltm.swc
+```
+
+## SWC Annual Aggregation and Visualization
+
+```{r}
+yearly_sum = monthly_sum %>% 
+  mutate(time_year = floor_date(time_month, unit = "year")) %>% 
+  group_by(time_year, var, model) %>% 
+  summarise(across(where(is.numeric), mean))
+
+
+yearly_sum %>% 
+  ggplot(aes(x = time_year))+
+  facet_wrap(.~var, scales = "free_y")+
+  geom_line(aes(y = mean, color = model))+
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3)+
+  scale_x_date(limits = c(ymd(start_year),ymd(end_year)))+
+  labs(x= "",y = "SWC [mm]", title = str_c("Annual mean SWC across 100 calibration runs"),
+       caption = "The ribbon represents the [mean-sd, mean+sd] range")
+fname = str_c("yearly","bylayer","SWC",".png", sep = "_")
+ggsave(here("RESULTADOS","FIGS",'COMPARISON_SUMMARY_AET_SWC',fname), width = 10, height = 8)
+```
+
+```{r}
+yearly_sum %>%
+  group_by(time_year, model) %>% 
+  summarise(across(where(is.numeric), sum)) %>% 
+  ggplot(aes(x = time_year))+
+  # facet_wrap(.~var, scales = "free_y")+
+  geom_line(aes(y = mean, color = model))+
+  geom_ribbon(aes(ymin = mean-sd, ymax = mean+sd, fill = model), alpha = 0.3)+
+  scale_x_date(limits = c(ymd(start_year),ymd(end_year)))+
+  labs(x= "",y = "swc [mm]", title = str_c("Annual mean SWC of entire soil profile across 100 calibration runs"),
+       caption = "The ribbon represents the [mean-sd, mean+sd] range")
+fname = str_c("yearly","SWC",".png", sep = "_")
+```
+
+```{r eval=FALSE, include=FALSE}
+ggsave(here("RESULTADOS","FIGS",'COMPARISON_SUMMARY_AET_SWC',fname), width = 10, height = 8)
+```
+
+```{r fig.height=6, fig.width=10}
+ggpubr::ggarrange(plot.ltm.aet, plot.ltm.swc, ncol = 1)
+```
+
+# Paper Figure 7
+
+
+```{r fig.height=9, fig.width=12}
+# boxplot.ltm = ggpubr::ggarrange(boxplot.aet, boxplot.swc, ncol = 1, labels = c("a","b"))
+# boxplot.ltm
+# boxplot.ltm = ggpubr::ggarrange(boxplot.aet.mean, boxplot.swc.mean, 
+#                                 ncol = 1, labels = c("a","b"))
+# boxplot.ltm
+boxplot.ltm = ggpubr::ggarrange(boxplot.ltm.aet, boxplot.ltm.swc, ncol = 1, labels = c("a","b"))
+boxplot.ltm
+```
+
+```{r eval=FALSE, include=FALSE}
+ggsave(here("resultados","figs","boxplot_aET_SWC.png"), height = 9, width = 12,
+       plot = boxplot.ltm)
+ggsave(here("resultados","figs","boxplot_aET_SWC.svg"), height = 9, width = 12,
+       plot = boxplot.ltm)
+
+```
+
+# Spatial distribution of SWC and aET {.tabset}
+
+```{r}
+# Function to create ggplot for a raster
+plot_raster_swc <- function(r, title, season, depth, color.opt = 1, timestep = "") {
+  # df <- as.data.frame(r, xy=TRUE)
+  # browser()
+  # Create the conditional theme
+  conditional_theme <- theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text=element_blank(), 
+    axis.ticks=element_blank(), 
+    axis.title=element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "plain"),
+    plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm")
+  )
+  # Modify the strip.text element conditionally
+  if (depth == "1-2 [m]") {
+    conditional_theme <- conditional_theme + theme(strip.text = element_blank())
+  }
+  if (color.opt == 1){
+    color.scale = scale_fill_distiller(type = "seq", palette = 16, direction = 1,
+                                       na.value = "transparent", 
+                                       name = str_c("SWC ",depth),
+                                       limits = c(scale.lim[[m]][[depth]][["min"]][[season]],
+                                                  scale.lim[[m]][[depth]][["max"]][[season]]
+                                                  ),
+                                       oob = scales::squish)
+  }else if (color.opt == 2){
+    color.scale = scale_fill_distiller(type = "seq", palette = 16, direction = 1,
+                                       na.value = "transparent", 
+                                       name = str_c("SWC ",depth),
+                                       limits = c(
+                                         scale.lim[[m]][["0-2 [m]"]][["min"]][[season]],
+                                         scale.lim[[m]][["0-2 [m]"]][["max"]][[season]]),
+                                       oob = scales::squish) 
+  }else{
+    color.scale = scale_fill_distiller(type = "seq", palette = 16, direction = 1,
+                                       na.value = "transparent", 
+                                       name = str_c("SWC ",depth),
+                                       limits = c(global.scale.lim[1],
+                                                  global.scale.lim[2]),
+                                       oob = scales::squish) 
+  }
+  
+  p = ggplot() +
+    geom_stars(data = stars::st_as_stars(r)) +  
+    color.scale+
+    theme_map()+
+    coord_fixed()+
+    ggtitle(title) +
+    conditional_theme
+  
+  if (timestep == "monthly"){
+    p = ggplot() +
+      geom_stars(data = stars::st_as_stars(r)) +  
+      color.scale+
+      theme_map()+
+      coord_fixed()+
+      ggtitle(title) +
+      conditional_theme +
+      facet_wrap(~ band, nrow = 2, ncol = 12)
+  }
+  return(p)
+}
+
+
+# Function to create ggplot for a raster
+plot_raster_aet <- function(r, title, season, depth, color.opt = 1, timestep = "") {
+  # Create the conditional theme
+  conditional_theme <- theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text=element_blank(), 
+    axis.ticks=element_blank(), 
+    axis.title=element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "plain"),
+    plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm")
+  )
+  
+  # Modify the strip.text element conditionally
+  if (depth == "1-2 [m]") {
+    conditional_theme <- conditional_theme + theme(strip.text = element_blank())
+  }
+  
+  if (color.opt == 1){
+    color.scale = scale_fill_distiller(type = "seq", palette = 16, direction = 1,
+                                       na.value = "transparent", 
+                                       name = str_c("aET ",depth),
+                                       limits = c(
+                                         scale.lim[[m]][[depth]][["min"]][[season]],
+                                         scale.lim[[m]][[depth]][["max"]][[season]])
+                                       ,
+                                       oob = scales::squish)
+  }else if (color.opt == 2){
+    color.scale = scale_fill_distiller(type = "seq", palette = 16, direction = 1,
+                                       na.value = "transparent", 
+                                       name = str_c("aET ",depth),
+                                       limits = c(
+                                         scale.lim[[m]][["0-2 [m]"]][["min"]][[season]],
+                                         scale.lim[[m]][["0-2 [m]"]][["max"]][[season]]
+                                       ),
+                                       oob = scales::squish) 
+  }else{
+    color.scale = scale_fill_distiller(type = "seq", palette = 16, direction = 1,
+                                       na.value = "transparent", 
+                                       name = str_c("aET ",depth),
+                                       limits = c(global.scale.lim[1],
+                                                  global.scale.lim[2]),
+                                       oob = scales::squish) 
+  }
+  
+  p = ggplot() +
+    geom_stars(data = stars::st_as_stars(r)) +  
+    color.scale+
+    theme_map()+
+    coord_fixed()+
+    ggtitle(title) +
+    conditional_theme
+  
+  if (timestep == "monthly"){
+    p = ggplot() +
+      geom_stars(data = stars::st_as_stars(r)) +  
+      color.scale+
+      theme_map()+
+      coord_fixed()+
+      ggtitle(title) +
+      conditional_theme +
+      facet_wrap(~ band, nrow = 2, ncol = 12)
+  }
+  return(p)
+}
+
+calc_mean_sd_iterations <- function(files) {
+  r_total = rast(files[1])
+  message("Calculating mean")
+  for (i in 2:length(files)) {
+    # print(i)
+    r_i = rast(files[i])
+    r_total = r_total+r_i
+  }
+  r_mean = r_total/length(files)
+  message("Calculating sd")
+  for (i in 1:length(files)) {
+    # print(i)
+    r_i = rast(files[i])
+    r_total = (r_i-r_mean)^2
+  }
+  r_sd = sqrt(r_total/(length(files)-1))
+  message("Done.")
+  return(
+    list(mean = r_mean,
+         sd = r_sd)
+  )
+}
+```
+
+## Monthly spatial distribution of SWC {.tabset}
+
+```{r}
+models = c("CLSM","SG","FAO")
+scale.lim = list()
+swcplot.mean = list()
+
+for (i in 1:length(models)) {
+  # i=2
+  m = models[i]
+  # print(m)
+  in.dir = str_c("G:/mHM/PROC/RAST/calibrated_model_output/",m,"/SWC_summary")
+  
+  global.scale.lim = c(0.07108617, 87.94046)
+  swc.up = rast(here(in.dir,str_c("totalswc_mmean_up_mean.tif")))
+  quant = quantile(swc.up, probs = c(0.1,0.9))
+  qmin = min(values(quant[[1]]), na.rm=TRUE)
+  qmax = max(values(quant[[2]]), na.rm=TRUE)
+  scale.lim[[m]][["0-1 [m]"]][["min"]][["all"]] = qmin
+  scale.lim[[m]][["0-1 [m]"]][["max"]][["all"]] = qmax
+  
+  swc.deep = rast(here(in.dir,str_c("totalswc_mmean_deep_mean.tif")))
+  quant = quantile(swc.deep, probs = c(0.1,0.9))
+  qmin = min(values(quant[[1]]), na.rm=TRUE)
+  qmax = max(values(quant[[2]]), na.rm=TRUE)
+  scale.lim[[m]][["1-2 [m]"]][["min"]][["all"]] = qmin
+  scale.lim[[m]][["1-2 [m]"]][["max"]][["all"]] = qmax
+  
+  swcplot.mean[[m]][["0-1 [m]"]][["all"]] = plot_raster_swc(swc.up[[c(5:12,1:4)]],
+                                                   title = "", depth="0-1 [m]",
+                                                   season = "all",
+                                                   timestep = "monthly")
+  swcplot.mean[[m]][["1-2 [m]"]][["all"]] = plot_raster_swc(swc.deep[[c(5:12,1:4)]],
+                                                   title = "", depth="1-2 [m]",
+                                                   season = "all",
+                                                   timestep = "monthly")
+}
+```
+
+```{r}
+scale.lim = list()
+swcplot.sd = list()
+
+for (i in 1:length(models)) {
+  # i=2
+  m = models[i]
+  # print(m)
+  in.dir = str_c("G:/mHM/PROC/RAST/calibrated_model_output/",m,"/SWC_summary")
+  
+  global.scale.lim = c(0.07108617, 87.94046)
+  swc.up = rast(here(in.dir,str_c("totalswc_mmean_up_sd.tif")))
+  quant = quantile(swc.up, probs = c(0.1,0.9))
+  qmin = min(values(quant[[1]]), na.rm=TRUE)
+  qmax = max(values(quant[[2]]), na.rm=TRUE)
+  scale.lim[[m]][["0-1 [m]"]][["min"]][["all"]] = qmin
+  scale.lim[[m]][["0-1 [m]"]][["max"]][["all"]] = qmax
+  
+  swc.deep = rast(here(in.dir,str_c("totalswc_mmean_deep_sd.tif")))
+  quant = quantile(swc.deep, probs = c(0.1,0.9))
+  qmin = min(values(quant[[1]]), na.rm=TRUE)
+  qmax = max(values(quant[[2]]), na.rm=TRUE)
+  scale.lim[[m]][["1-2 [m]"]][["min"]][["all"]] = qmin
+  scale.lim[[m]][["1-2 [m]"]][["max"]][["all"]] = qmax
+  
+  swcplot.sd[[m]][["0-1 [m]"]][["all"]] = plot_raster_swc(swc.up[[c(5:12,1:4)]],
+                                                   title = "", depth="0-1 [m]",
+                                                   season = "all",
+                                                   timestep = "monthly")
+  swcplot.sd[[m]][["1-2 [m]"]][["all"]] = plot_raster_swc(swc.deep[[c(5:12,1:4)]],
+                                                   title = "", depth="1-2 [m]",
+                                                   season = "all",
+                                                   timestep = "monthly")
+}
+```
+
+### CLSM
+
+#### Mean
+
+```{r fig.height=4, fig.width=14}
+swcplot1 = ggpubr::ggarrange(swcplot.mean[["CLSM"]][["0-1 [m]"]][["all"]],
+                             swcplot.mean[["CLSM"]][["1-2 [m]"]][["all"]],
+                             nrow = 2)
+swcplot1
+```
+
+#### sd
+
+```{r fig.height=4, fig.width=14}
+swcplot1sd = ggpubr::ggarrange(swcplot.sd[["CLSM"]][["0-1 [m]"]][["all"]],
+                             swcplot.sd[["CLSM"]][["1-2 [m]"]][["all"]],
+                             nrow = 2)
+swcplot1sd
+```
+
+### FAO
+
+#### mean
+
+```{r fig.height=4, fig.width=14}
+
+swcplot2 = ggpubr::ggarrange(swcplot.mean[["FAO"]][["0-1 [m]"]][["all"]],
+                             swcplot.mean[["FAO"]][["1-2 [m]"]][["all"]],
+                             nrow = 2)
+swcplot2
+```
+
+#### sd
+
+```{r fig.height=4, fig.width=14}
+
+swcplot2sd = ggpubr::ggarrange(swcplot.sd[["FAO"]][["0-1 [m]"]][["all"]],
+                             swcplot.sd[["FAO"]][["1-2 [m]"]][["all"]],
+                             nrow = 2)
+swcplot2sd
+```
+
+### SG
+
+#### mean
+
+```{r fig.height=4, fig.width=14}
+swcplot3 = ggpubr::ggarrange(swcplot.mean[["SG"]][["0-1 [m]"]][["all"]],
+                             swcplot.mean[["SG"]][["1-2 [m]"]][["all"]],
+                             nrow = 2)
+swcplot3
+```
+
+#### sd
+
+```{r fig.height=4, fig.width=14}
+swcplot3sd = ggpubr::ggarrange(swcplot.sd[["SG"]][["0-1 [m]"]][["all"]],
+                             swcplot.sd[["SG"]][["1-2 [m]"]][["all"]],
+                             nrow = 2)
+swcplot3sd
+```
+
+```{r eval=FALSE, fig.height=4, fig.width=10, include=FALSE}
+swcplots = ggpubr::ggarrange(swcplot1, swcplot2, swcplot3, ncol = 1)
+ggsave(filename = here("resultados","figs","SPATIAL_SM",
+                       str_c("monthly_spatial_swc_models_mean.png")),
+       width = 14, height = 14, plot = swcplots)
+```
+
+```{r eval=FALSE, fig.height=4, fig.width=10, include=FALSE}
+swcplotssd = ggpubr::ggarrange(swcplot1sd, swcplot2sd, swcplot3sd, ncol = 1)
+ggsave(filename = here("resultados","figs","SPATIAL_SM",
+                       str_c("monthly_spatial_swc_models_sd.png")),
+       width = 14, height = 14, plot = swcplotssd)
+```
+
+## Seasonal spatial distribution of SWC {.tabset}
+
+
+```{r}
+files.clsm = list.files(here("PROC/RAST/calibrated_model_output/CLSM/season_summary_swc"), full.names = TRUE)
+files.fao = list.files(here("PROC/RAST/calibrated_model_output/FAO/season_summary_swc"), full.names = TRUE)
+files.sg = list.files(here("PROC/RAST/calibrated_model_output/SG/season_summary_swc"), full.names = TRUE)
+
+ac.up.mean = c(files.clsm[1], files.sg[1], files.fao[1]) %>% rast
+ac.up.sd = c(files.clsm[2], files.sg[2], files.fao[2]) %>% rast
+ac.deep.mean = c(files.clsm[3], files.sg[3], files.fao[3]) %>% rast
+ac.deep.sd = c(files.clsm[4], files.sg[4], files.fao[4]) %>% rast
+ac.up.cv = 100*ac.up.sd/ac.up.mean
+ac.deep.cv = 100*ac.deep.sd/ac.deep.mean
+
+names(ac.up.mean) = str_c("mHM-",models)
+names(ac.deep.mean) = str_c("mHM-",models)
+names(ac.up.sd) = str_c("mHM-",models)
+names(ac.deep.sd) = str_c("mHM-",models)
+names(ac.up.cv) = str_c("mHM-",models)
+names(ac.deep.cv) = str_c("mHM-",models)
+
+re.up.mean = c(files.clsm[5], files.sg[5], files.fao[5]) %>% rast
+re.up.sd = c(files.clsm[6], files.sg[6], files.fao[6]) %>% rast
+re.deep.mean = c(files.clsm[7], files.sg[7], files.fao[7]) %>% rast
+re.deep.sd = c(files.clsm[8], files.sg[8], files.fao[8]) %>% rast
+re.up.cv = 100*re.up.sd/re.up.mean
+re.deep.cv = 100*re.deep.sd/re.deep.mean
+
+names(re.up.mean) = str_c("mHM-",models)
+names(re.deep.mean) = str_c("mHM-",models)
+names(re.up.sd) = str_c("mHM-",models)
+names(re.deep.sd) = str_c("mHM-",models)
+names(re.up.cv) = str_c("mHM-",models)
+names(re.deep.cv) = str_c("mHM-",models)
+```
+
+### same color scale {.tabset}
+
+#### Accumulation
+
+```{r fig.height=3, fig.width=11}
+scale.lim = get_scale_lim(ac.up.mean)
+plot_raster_facet(ac.up.mean, "0-100[cm]", "SWC [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+  # theme(axis.text.y = )
+
+scale.lim = get_scale_lim(ac.up.sd)
+plot_raster_facet(ac.up.sd, "0-100[cm]","SWC [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+
+scale.lim = get_scale_lim(ac.deep.mean)
+plot_raster_facet(ac.deep.mean, "100-200[cm]","SWC [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+
+scale.lim = get_scale_lim(ac.deep.sd)
+plot_raster_facet(ac.deep.sd, "100-200[cm]","SWC [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+
+scale.lim = get_scale_lim(ac.up.cv)
+plot_raster_facet(ac.up.cv, "0-100[cm]","SWC.CV [%]", c(scale.lim[[1]], scale.lim[[2]]),
+                  facet_col = "band")+
+  theme_grid
+
+scale.lim = get_scale_lim(ac.deep.cv)
+plot_raster_facet(ac.deep.cv, "100-200[cm]","SWC.CV [%]", c(scale.lim[[1]], scale.lim[[2]]),
+                  facet_col = "band")+
+  theme_grid
+```
+
+#### Release
+
+```{r fig.height=3, fig.width=11}
+scale.lim = get_scale_lim(re.up.mean)
+p1 = plot_raster_facet(re.up.mean, "0-100[cm]", "SWC [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid + ggtitle("Ensemble Mean of SWC from 0-100 cm.")
+p1
+scale.lim = get_scale_lim(re.up.sd)
+p2 = plot_raster_facet(re.up.sd, "0-100[cm]","SWC [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid + ggtitle("Ensemble SD of SWC from 0-100 cm.")
+p2
+scale.lim = get_scale_lim(re.deep.mean)
+p3 = plot_raster_facet(re.deep.mean, "100-200[cm]","SWC [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid + ggtitle("Ensemble Mean of SWC from 100-200 cm.")
+p3
+scale.lim = get_scale_lim(re.deep.sd)
+p4 = plot_raster_facet(re.deep.sd, "100-200[cm]","SWC [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid + ggtitle("Ensemble SD of SWC from 100-200 cm.")
+p4
+
+scale.lim = get_scale_lim(re.up.cv)
+p5 = plot_raster_facet(re.deep.cv, "0-100[cm]","SWC.CV [%]", c(scale.lim[[1]], scale.lim[[2]]),
+                       facet_col = "band")+
+  theme_grid + ggtitle("Ensemble CV of SWC from 0-100 cm.")
+p5
+
+scale.lim = get_scale_lim(re.deep.cv)
+p6 = plot_raster_facet(re.deep.cv, "100-200[cm]","SWC.CV [%]", c(scale.lim[[1]], scale.lim[[2]]),
+                       facet_col = "band")+
+  theme_grid + ggtitle("Ensemble CV of SWC from 100-200 cm.")
+p6
+```
+
+### Paper Figure 9 (same scale)
+
+```{r fig.height=6, fig.width=14}
+plot.swc.map = ggpubr::ggarrange(p1,p2,p3,p4, ncol = 2, nrow = 2, labels = c("a","b","c","d"))
+plot.swc.map
+```
+
+
+```{r fig.height=3, fig.width=14}
+plot.swc.map.cv = ggpubr::ggarrange(p5,p6, ncol = 2, nrow = 1, labels = c("a","b"))
+plot.swc.map.cv
+```
+```{r eval=FALSE, include=FALSE}
+ggsave(here("resultados","figs","SWCmap_mean_sd_release.png"), width = 14, height = 6,
+       plot = plot.swc.map)
+ggsave(here("resultados","figs","SWCmap_mean_sd_release.svg"), width = 14, height = 6,
+       plot = plot.swc.map)
+
+ggsave(here("resultados","figs","SWCmap_cv_release.png"), width = 14, height = 3,
+       plot = plot.swc.map.cv)
+ggsave(here("resultados","figs","SWCmap_cv_release.svg"), width = 14, height = 3,
+       plot = plot.swc.map.cv)
+```
+
+
+### dif color scale {.tabset}
+
+#### Accumulation
+
+```{r fig.height=3, fig.width=12}
+# Using a different color scale for each map
+plot.list = list()
+scale.lim = get_scale_lim(ac.up.mean[[1]])
+plot.list[["CLSM"]][["up"]][["mean"]][["ac"]] =  plot_raster(ac.up.mean[[1]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - mean")
+scale.lim = get_scale_lim(ac.up.mean[[2]])
+plot.list[["SG"]][["up"]][["mean"]][["ac"]] =  plot_raster(ac.up.mean[[2]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - mean")
+scale.lim = get_scale_lim(ac.up.mean[[3]])
+plot.list[["FAO"]][["up"]][["mean"]][["ac"]] =  plot_raster(ac.up.mean[[3]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - mean")
+
+scale.lim = get_scale_lim(ac.up.sd[[1]])
+plot.list[["CLSM"]][["up"]][["sd"]][["ac"]] =  plot_raster(ac.up.sd[[1]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - sd")
+scale.lim = get_scale_lim(ac.up.sd[[2]])
+plot.list[["SG"]][["up"]][["sd"]][["ac"]] =  plot_raster(ac.up.sd[[2]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - sd")
+scale.lim = get_scale_lim(ac.up.sd[[3]])
+plot.list[["FAO"]][["up"]][["sd"]][["ac"]] =  plot_raster(ac.up.sd[[3]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - sd")
+
+scale.lim = get_scale_lim(ac.deep.mean[[1]])
+plot.list[["CLSM"]][["deep"]][["mean"]][["ac"]] =  plot_raster(ac.deep.mean[[1]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - mean")
+scale.lim = get_scale_lim(ac.deep.mean[[2]])
+plot.list[["SG"]][["deep"]][["mean"]][["ac"]] =  plot_raster(ac.deep.mean[[2]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - mean")
+scale.lim = get_scale_lim(ac.deep.mean[[3]])
+plot.list[["FAO"]][["deep"]][["mean"]][["ac"]] =  plot_raster(ac.deep.mean[[3]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - mean")
+
+scale.lim = get_scale_lim(ac.deep.sd[[1]])
+plot.list[["CLSM"]][["deep"]][["sd"]][["ac"]] =  plot_raster(ac.deep.sd[[1]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - sd")
+scale.lim = get_scale_lim(ac.deep.sd[[2]])
+plot.list[["SG"]][["deep"]][["sd"]][["ac"]] =  plot_raster(ac.deep.sd[[2]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - sd")
+scale.lim = get_scale_lim(ac.deep.sd[[3]])
+plot.list[["FAO"]][["deep"]][["sd"]][["ac"]] =  plot_raster(ac.deep.sd[[3]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - sd")
+
+
+plot.list = list()
+scale.lim = get_scale_lim(ac.up.cv[[1]])
+plot.list[["CLSM"]][["up"]][["cv"]][["ac"]] =  plot_raster(ac.up.cv[[1]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - CV")
+scale.lim = get_scale_lim(ac.up.cv[[2]])
+plot.list[["SG"]][["up"]][["cv"]][["ac"]] =  plot_raster(ac.up.cv[[2]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - CV")
+scale.lim = get_scale_lim(ac.up.cv[[3]])
+plot.list[["FAO"]][["up"]][["cv"]][["ac"]] =  plot_raster(ac.up.cv[[3]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - CV")
+
+scale.lim = get_scale_lim(ac.deep.cv[[1]])
+plot.list[["CLSM"]][["deep"]][["cv"]][["ac"]] =  plot_raster(ac.deep.cv[[1]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - CV")
+scale.lim = get_scale_lim(ac.deep.cv[[2]])
+plot.list[["SG"]][["deep"]][["cv"]][["ac"]] =  plot_raster(ac.deep.cv[[2]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - CV")
+scale.lim = get_scale_lim(ac.deep.cv[[3]])
+plot.list[["FAO"]][["deep"]][["cv"]][["ac"]] =  plot_raster(ac.deep.cv[[3]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - CV")
+```
+
+```{r fig.height=3, fig.width=11}
+ggpubr::ggarrange(plot.list[["CLSM"]][["up"]][["mean"]][["ac"]],
+                  plot.list[["SG"]][["up"]][["mean"]][["ac"]], 
+                  plot.list[["FAO"]][["up"]][["mean"]][["ac"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["up"]][["sd"]][["ac"]],
+                  plot.list[["SG"]][["up"]][["sd"]][["ac"]], 
+                  plot.list[["FAO"]][["up"]][["sd"]][["ac"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["mean"]][["ac"]],
+                  plot.list[["SG"]][["deep"]][["mean"]][["ac"]], 
+                  plot.list[["FAO"]][["deep"]][["mean"]][["ac"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["sd"]][["ac"]],
+                  plot.list[["SG"]][["deep"]][["sd"]][["ac"]], 
+                  plot.list[["FAO"]][["deep"]][["sd"]][["ac"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["cv"]][["ac"]],
+                  plot.list[["SG"]][["deep"]][["cv"]][["ac"]], 
+                  plot.list[["FAO"]][["deep"]][["cv"]][["ac"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["cv"]][["ac"]],
+                  plot.list[["SG"]][["deep"]][["cv"]][["ac"]], 
+                  plot.list[["FAO"]][["deep"]][["cv"]][["ac"]],
+                  ncol = 3)
+```
+
+#### Release
+
+```{r}
+# Using a different color scale for each map
+plot.list = list()
+scale.lim = get_scale_lim(re.up.mean[[1]])
+plot.list[["CLSM"]][["up"]][["mean"]][["re"]] =  plot_raster(re.up.mean[[1]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - mean")
+scale.lim = get_scale_lim(re.up.mean[[2]])
+plot.list[["SG"]][["up"]][["mean"]][["re"]] =  plot_raster(re.up.mean[[2]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - mean")
+scale.lim = get_scale_lim(re.up.mean[[3]])
+plot.list[["FAO"]][["up"]][["mean"]][["re"]] =  plot_raster(re.up.mean[[3]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - mean")
+
+scale.lim = get_scale_lim(re.up.sd[[1]])
+plot.list[["CLSM"]][["up"]][["sd"]][["re"]] =  plot_raster(re.up.sd[[1]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - sd")
+scale.lim = get_scale_lim(re.up.sd[[2]])
+plot.list[["SG"]][["up"]][["sd"]][["re"]] =  plot_raster(re.up.sd[[2]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - sd")
+scale.lim = get_scale_lim(re.up.sd[[3]])
+plot.list[["FAO"]][["up"]][["sd"]][["re"]] =  plot_raster(re.up.sd[[3]], "0-100[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - sd")
+
+scale.lim = get_scale_lim(re.deep.mean[[1]])
+plot.list[["CLSM"]][["deep"]][["mean"]][["re"]] =  plot_raster(re.deep.mean[[1]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - mean")
+scale.lim = get_scale_lim(re.deep.mean[[2]])
+plot.list[["SG"]][["deep"]][["mean"]][["re"]] =  plot_raster(re.deep.mean[[2]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - mean")
+scale.lim = get_scale_lim(re.deep.mean[[3]])
+plot.list[["FAO"]][["deep"]][["mean"]][["re"]] =  plot_raster(re.deep.mean[[3]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - mean")
+
+scale.lim = get_scale_lim(re.deep.sd[[1]])
+plot.list[["CLSM"]][["deep"]][["sd"]][["re"]] =  plot_raster(re.deep.sd[[1]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - sd")
+scale.lim = get_scale_lim(re.deep.sd[[2]])
+plot.list[["SG"]][["deep"]][["sd"]][["re"]] =  plot_raster(re.deep.sd[[2]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - sd")
+scale.lim = get_scale_lim(re.deep.sd[[3]])
+plot.list[["FAO"]][["deep"]][["sd"]][["re"]] =  plot_raster(re.deep.sd[[3]], "100-200[cm]","SWC", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - sd")
+```
+
+```{r fig.height=3, fig.width=12}
+p1.grid = ggpubr::ggarrange(plot.list[["CLSM"]][["up"]][["mean"]][["re"]],
+                  plot.list[["SG"]][["up"]][["mean"]][["re"]], 
+                  plot.list[["FAO"]][["up"]][["mean"]][["re"]],
+                  ncol = 3)
+
+p2.grid = ggpubr::ggarrange(plot.list[["CLSM"]][["up"]][["sd"]][["re"]],
+                  plot.list[["SG"]][["up"]][["sd"]][["re"]], 
+                  plot.list[["FAO"]][["up"]][["sd"]][["re"]],
+                  ncol = 3)
+
+p3.grid = ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["mean"]][["re"]],
+                  plot.list[["SG"]][["deep"]][["mean"]][["re"]], 
+                  plot.list[["FAO"]][["deep"]][["mean"]][["re"]],
+                  ncol = 3)
+
+p4.grid = ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["sd"]][["re"]],
+                  plot.list[["SG"]][["deep"]][["sd"]][["re"]], 
+                  plot.list[["FAO"]][["deep"]][["sd"]][["re"]],
+                  ncol = 3)
+```
+
+
+```{r fig.height=7, fig.width=20}
+ggpubr::ggarrange(p1.grid, p2.grid, p3.grid, p4.grid,
+                  labels = c("a","b","c","d"), 
+                  ncol = 2, nrow = 2)
+```
+```{r fig.height=4, fig.width=10}
+ggpubr::ggarrange(p1.grid, p2.grid,
+                  labels = c("a","b"), 
+                  ncol = 1, nrow = 2)
+ggpubr::ggarrange(p3.grid, p4.grid,
+                  labels = c("c","d"), 
+                  ncol = 1, nrow = 2)
+```
+
+### boxplot of spatial distribution
+
+```{r fig.height=5, fig.width=10}
+df1 = get_raster_values(ac.up.mean, stat = "mean", layer = "0-100", season = "accumulation")
+df2 = get_raster_values(ac.up.sd, stat = "sd", layer = "0-100", season = "accumulation")
+df3 = get_raster_values(ac.deep.mean, stat = "mean", layer = "100-200", season = "accumulation")
+df4 = get_raster_values(ac.deep.sd, stat = "sd", layer = "100-200", season = "accumulation")
+df.ac = bind_rows(df1,df2,df3,df4)
+df1 = get_raster_values(re.up.mean, stat = "mean", layer = "0-100", season = "release")
+df2 = get_raster_values(re.up.sd, stat = "sd", layer = "0-100", season = "release")
+df3 = get_raster_values(re.deep.mean, stat = "mean", layer = "100-200", season = "release")
+df4 = get_raster_values(re.deep.sd, stat = "sd", layer = "100-200", season = "release")
+df.re = bind_rows(df1,df2,df3,df4)
+
+df = bind_rows(df.re, df.ac) %>% 
+  mutate(layer = factor(layer, levels = c("100-200","0-100")))
+# ggplot(df, aes(y = layer, x = SWC, color = model))+
+#   facet_wrap(.~season+stat, scales = "free")+
+#   geom_boxplot()
+```
+
+
+```{r fig.height=3, fig.width=10}
+ggplot(df %>% filter(stat == "mean"), aes(y = layer, x = SWC, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  labs(x = "SWC.mean [mm]")+
+  ggtitle("Mean")+
+  scale_color_discrete(type = model.color, name = "")
+
+ggplot(df %>% filter(stat == "sd"), aes(y = layer, x = SWC, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  labs(x = "SWC.sd [mm]")+
+  ggtitle("SD")+ 
+  scale_color_discrete(type = model.color, name = "")
+
+```
+
+## Seasonal spatial destribution of aET {.tabset}
+
+```{r}
+files.clsm = list.files(here("PROC/RAST/calibrated_model_output/CLSM/season_summary_aet"), full.names = TRUE)
+files.fao = list.files(here("PROC/RAST/calibrated_model_output/FAO/season_summary_aet"), full.names = TRUE)
+files.sg = list.files(here("PROC/RAST/calibrated_model_output/SG/season_summary_aet"), full.names = TRUE)
+
+ac.up.mean = c(files.clsm[1], files.sg[1], files.fao[1]) %>% rast
+ac.up.sd = c(files.clsm[2], files.sg[2], files.fao[2]) %>% rast
+ac.deep.mean = c(files.clsm[3], files.sg[3], files.fao[3]) %>% rast
+ac.deep.sd = c(files.clsm[4], files.sg[4], files.fao[4]) %>% rast
+ac.up.cv = 100*ac.up.sd/ac.up.mean
+ac.deep.cv = 100*ac.deep.sd/ac.deep.mean
+
+names(ac.up.mean) = str_c("mHM-",models)
+names(ac.deep.mean) = str_c("mHM-",models)
+names(ac.up.sd) = str_c("mHM-",models)
+names(ac.deep.sd) = str_c("mHM-",models)
+names(ac.up.cv) = str_c("mHM-",models)
+names(ac.deep.cv) = str_c("mHM-",models)
+
+re.up.mean = c(files.clsm[5], files.sg[5], files.fao[5]) %>% rast
+re.up.sd = c(files.clsm[6], files.sg[6], files.fao[6]) %>% rast
+re.deep.mean = c(files.clsm[7], files.sg[7], files.fao[7]) %>% rast
+re.deep.sd = c(files.clsm[8], files.sg[8], files.fao[8]) %>% rast
+re.up.cv = 100*re.up.sd/re.up.mean
+re.deep.cv = 100*re.deep.sd/re.deep.mean
+
+names(re.up.mean) = str_c("mHM-",models)
+names(re.deep.mean) = str_c("mHM-",models)
+names(re.up.sd) = str_c("mHM-",models)
+names(re.deep.sd) = str_c("mHM-",models)
+names(re.up.cv) = str_c("mHM-",models)
+names(re.deep.cv) = str_c("mHM-",models)
+```
+
+### same color scale {.tabset}
+
+#### Accumulation
+
+```{r fig.height=3, fig.width=11}
+scale.lim = get_scale_lim(ac.up.mean)
+plot_raster_facet(ac.up.mean, "0-100[cm]", "aET.mean", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+
+scale.lim = get_scale_lim(ac.up.sd)
+plot_raster_facet(ac.up.sd, "0-100[cm]","aET.sd", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+
+scale.lim = get_scale_lim(ac.deep.mean)
+plot_raster_facet(ac.deep.mean, "100-200[cm]","aET.mean", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+
+scale.lim = get_scale_lim(ac.deep.sd)
+plot_raster_facet(ac.deep.sd, "100-200[cm]","aET.sd", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid
+
+scale.lim = get_scale_lim(ac.up.cv)
+plot_raster_facet(ac.up.cv, "0-100[cm]","aET.CV [%]", c(scale.lim[[1]], scale.lim[[2]]),
+                  facet_col = "band")+
+  theme_grid
+
+scale.lim = get_scale_lim(ac.deep.cv)
+plot_raster_facet(ac.deep.cv, "100-200[cm]","aET.CV [%]", c(scale.lim[[1]], scale.lim[[2]]),
+                  facet_col = "band")+
+  theme_grid
+```
+
+#### Release
+
+```{r fig.height=3, fig.width=11}
+scale.lim = get_scale_lim(re.up.mean)
+p1 = plot_raster_facet(re.up.mean, "0-100[cm]", "aET [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid + ggtitle("Ensemble Mean of aET from 0-100 cm.")
+p1
+scale.lim = get_scale_lim(re.up.sd)
+p2 = plot_raster_facet(re.up.sd, "0-100[cm]","aET [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid + ggtitle("Ensemble SD of aET from 0-100 cm.")
+p2
+scale.lim = get_scale_lim(re.deep.mean)
+p3 = plot_raster_facet(re.deep.mean, "100-200[cm]","aET [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid + ggtitle("Ensemble Mean of aET from 100-200 cm.")
+p3
+scale.lim = get_scale_lim(re.deep.sd)
+p4 = plot_raster_facet(re.deep.sd, "100-200[cm]","aET [mm]", c(scale.lim[[1]], scale.lim[[2]]))+
+  theme_grid + ggtitle("Ensemble SD of aET from 100-200 cm.")
+p4
+
+scale.lim = get_scale_lim(re.up.cv)
+p5 = plot_raster_facet(re.deep.cv, "0-100[cm]","SWC.CV [%]", c(scale.lim[[1]], scale.lim[[2]]),
+                       facet_col = "band")+
+  theme_grid + ggtitle("Ensemble CV of aET from 0-100 cm.")
+p5
+
+scale.lim = get_scale_lim(re.deep.cv)
+p6 = plot_raster_facet(re.deep.cv, "100-200[cm]","SWC.CV [%]", c(scale.lim[[1]], scale.lim[[2]]),
+                       facet_col = "band")+
+  theme_grid + ggtitle("Ensemble CV of aET from 100-200 cm.")
+p6
+```
+
+### Paper Figure 10
+
+```{r fig.height=6, fig.width=14}
+plot.aet.map = ggpubr::ggarrange(p1,p2,p3,p4, ncol = 2, nrow = 2, labels = c("a","b","c","d"))
+plot.aet.map
+```
+
+```{r fig.height=3, fig.width=14}
+plot.aet.map.cv = ggpubr::ggarrange(p5,p6, ncol = 2, nrow = 1, labels = c("a","b"))
+plot.aet.map.cv
+```
+
+```{r eval=FALSE, include=FALSE}
+ggsave(here("resultados","figs","aETmap_mean_sd_release.png"), width = 14, height = 6,
+       plot = plot.aet.map)
+ggsave(here("resultados","figs","aETmap_mean_sd_release.svg"), width = 14, height = 6,
+       plot = plot.aet.map)
+
+ggsave(here("resultados","figs","aETmap_cv_release.png"), width = 14, height = 3,
+       plot = plot.aet.map.cv)
+ggsave(here("resultados","figs","aETmap_cv_release.svg"), width = 14, height = 3,
+       plot = plot.aet.map.cv)
+```
+
+### dif color scale {.tabset}
+
+#### Accumulation
+
+```{r fig.height=3, fig.width=12}
+# Using a different color scale for each map
+plot.list = list()
+scale.lim = get_scale_lim(ac.up.mean[[1]])
+plot.list[["CLSM"]][["up"]][["mean"]][["ac"]] =  plot_raster(ac.up.mean[[1]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - mean")
+scale.lim = get_scale_lim(ac.up.mean[[2]])
+plot.list[["SG"]][["up"]][["mean"]][["ac"]] =  plot_raster(ac.up.mean[[2]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - mean")
+scale.lim = get_scale_lim(ac.up.mean[[3]])
+plot.list[["FAO"]][["up"]][["mean"]][["ac"]] =  plot_raster(ac.up.mean[[3]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - mean")
+
+scale.lim = get_scale_lim(ac.up.sd[[1]])
+plot.list[["CLSM"]][["up"]][["sd"]][["ac"]] =  plot_raster(ac.up.sd[[1]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - SD")
+scale.lim = get_scale_lim(ac.up.sd[[2]])
+plot.list[["SG"]][["up"]][["sd"]][["ac"]] =  plot_raster(ac.up.sd[[2]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - SD")
+scale.lim = get_scale_lim(ac.up.sd[[3]])
+plot.list[["FAO"]][["up"]][["sd"]][["ac"]] =  plot_raster(ac.up.sd[[3]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - SD")
+
+scale.lim = get_scale_lim(ac.deep.mean[[1]])
+plot.list[["CLSM"]][["deep"]][["mean"]][["ac"]] =  plot_raster(ac.deep.mean[[1]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - mean")
+scale.lim = get_scale_lim(ac.deep.mean[[2]])
+plot.list[["SG"]][["deep"]][["mean"]][["ac"]] =  plot_raster(ac.deep.mean[[2]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - mean")
+scale.lim = get_scale_lim(ac.deep.mean[[3]])
+plot.list[["FAO"]][["deep"]][["mean"]][["ac"]] =  plot_raster(ac.deep.mean[[3]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - mean")
+
+scale.lim = get_scale_lim(ac.deep.sd[[1]])
+plot.list[["CLSM"]][["deep"]][["sd"]][["ac"]] =  plot_raster(ac.deep.sd[[1]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - SD")
+scale.lim = get_scale_lim(ac.deep.sd[[2]])
+plot.list[["SG"]][["deep"]][["sd"]][["ac"]] =  plot_raster(ac.deep.sd[[2]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - SD")
+scale.lim = get_scale_lim(ac.deep.sd[[3]])
+plot.list[["FAO"]][["deep"]][["sd"]][["ac"]] =  plot_raster(ac.deep.sd[[3]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - SD")
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["up"]][["mean"]][["ac"]],
+                  plot.list[["SG"]][["up"]][["mean"]][["ac"]], 
+                  plot.list[["FAO"]][["up"]][["mean"]][["ac"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["up"]][["sd"]][["ac"]],
+                  plot.list[["SG"]][["up"]][["sd"]][["ac"]], 
+                  plot.list[["FAO"]][["up"]][["sd"]][["ac"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["mean"]][["ac"]],
+                  plot.list[["SG"]][["deep"]][["mean"]][["ac"]], 
+                  plot.list[["FAO"]][["deep"]][["mean"]][["ac"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["sd"]][["ac"]],
+                  plot.list[["SG"]][["deep"]][["sd"]][["ac"]], 
+                  plot.list[["FAO"]][["deep"]][["sd"]][["ac"]],
+                  ncol = 3)
+```
+
+#### Release
+
+```{r fig.height=3, fig.width=12}
+# Using a different color scale for each map
+plot.list = list()
+scale.lim = get_scale_lim(re.up.mean[[1]])
+plot.list[["CLSM"]][["up"]][["mean"]][["re"]] =  plot_raster(re.up.mean[[1]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - mean")
+scale.lim = get_scale_lim(re.up.mean[[2]])
+plot.list[["SG"]][["up"]][["mean"]][["re"]] =  plot_raster(re.up.mean[[2]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - mean")
+scale.lim = get_scale_lim(re.up.mean[[3]])
+plot.list[["FAO"]][["up"]][["mean"]][["re"]] =  plot_raster(re.up.mean[[3]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - mean")
+
+scale.lim = get_scale_lim(re.up.sd[[1]])
+plot.list[["CLSM"]][["up"]][["sd"]][["re"]] =  plot_raster(re.up.sd[[1]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - SD")
+scale.lim = get_scale_lim(re.up.sd[[2]])
+plot.list[["SG"]][["up"]][["sd"]][["re"]] =  plot_raster(re.up.sd[[2]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - SD")
+scale.lim = get_scale_lim(re.up.sd[[3]])
+plot.list[["FAO"]][["up"]][["sd"]][["re"]] =  plot_raster(re.up.sd[[3]], "0-100[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - SD")
+
+scale.lim = get_scale_lim(re.deep.mean[[1]])
+plot.list[["CLSM"]][["deep"]][["mean"]][["re"]] =  plot_raster(re.deep.mean[[1]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - mean")
+scale.lim = get_scale_lim(re.deep.mean[[2]])
+plot.list[["SG"]][["deep"]][["mean"]][["re"]] =  plot_raster(re.deep.mean[[2]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - mean")
+scale.lim = get_scale_lim(re.deep.mean[[3]])
+plot.list[["FAO"]][["deep"]][["mean"]][["re"]] =  plot_raster(re.deep.mean[[3]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - mean")
+
+scale.lim = get_scale_lim(re.deep.sd[[1]])
+plot.list[["CLSM"]][["deep"]][["sd"]][["re"]] =  plot_raster(re.deep.sd[[1]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("CLSM - SD")
+scale.lim = get_scale_lim(re.deep.sd[[2]])
+plot.list[["SG"]][["deep"]][["sd"]][["re"]] =  plot_raster(re.deep.sd[[2]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("SG - SD")
+scale.lim = get_scale_lim(re.deep.sd[[3]])
+plot.list[["FAO"]][["deep"]][["sd"]][["re"]] =  plot_raster(re.deep.sd[[3]], "100-200[cm]","aET", c(scale.lim[[1]], scale.lim[[2]]))+ggtitle("FAO - SD")
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["up"]][["mean"]][["re"]],
+                  plot.list[["SG"]][["up"]][["mean"]][["re"]], 
+                  plot.list[["FAO"]][["up"]][["mean"]][["re"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["up"]][["sd"]][["re"]],
+                  plot.list[["SG"]][["up"]][["sd"]][["re"]], 
+                  plot.list[["FAO"]][["up"]][["sd"]][["re"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["mean"]][["re"]],
+                  plot.list[["SG"]][["deep"]][["mean"]][["re"]], 
+                  plot.list[["FAO"]][["deep"]][["mean"]][["re"]],
+                  ncol = 3)
+
+ggpubr::ggarrange(plot.list[["CLSM"]][["deep"]][["sd"]][["re"]],
+                  plot.list[["SG"]][["deep"]][["sd"]][["re"]], 
+                  plot.list[["FAO"]][["deep"]][["sd"]][["re"]],
+                  ncol = 3)
+```
+
+### boxplot of spatial distribution
+
+```{r}
+df1 = get_raster_values(ac.up.mean, stat = "mean", layer = "0-100", season = "accumulation")
+df2 = get_raster_values(ac.up.sd, stat = "sd", layer = "0-100", season = "accumulation")
+df3 = get_raster_values(ac.deep.mean, stat = "mean", layer = "100-200", season = "accumulation")
+df4 = get_raster_values(ac.deep.sd, stat = "sd", layer = "100-200", season = "accumulation")
+df.ac = bind_rows(df1,df2,df3,df4)
+df1 = get_raster_values(re.up.mean, stat = "mean", layer = "0-100", season = "release")
+df2 = get_raster_values(re.up.sd, stat = "sd", layer = "0-100", season = "release")
+df3 = get_raster_values(re.deep.mean, stat = "mean", layer = "100-200", season = "release")
+df4 = get_raster_values(re.deep.sd, stat = "sd", layer = "100-200", season = "release")
+df.re = bind_rows(df1,df2,df3,df4)
+
+
+
+df = bind_rows(df.re, df.ac) %>% 
+  mutate(layer = factor(layer, levels = c("100-200","0-100"))) %>% 
+  mutate(aET = SWC)
+# ggplot(df, aes(y = layer, x = aET, color = model))+
+#   facet_wrap(.~season+stat, scales = "free")+
+#   geom_boxplot()
+```
+```{r fig.height=3, fig.width=10}
+ggplot(df %>% filter(stat == "mean"), aes(y = layer, x = aET, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  labs(x = "aET.mean [mm]")+
+  ggtitle("Mean")+
+  scale_color_discrete(type = model.color, name = "")
+ggplot(df %>% filter(stat == "sd"), aes(y = layer, x = aET, color = model))+
+  facet_wrap(.~season)+
+  geom_boxplot()+
+  labs(x = "aET.sd [mm]")+
+  ggtitle("SD")+
+  scale_color_discrete(type = model.color, name = "")
+
+```
+
+# aET by LandCover
+
+```{r}
+
+# ET by land cover (Zhao)
+lc.din = rast(here("/DATA/RAST/LC/CLDynamicLandCover_cauquenes.tif"))
+# lc.zhao = rast(here("PROC","RAST","LC_zhao_cauquenes_reclass.tif"))
+# lc.zhao = rast("D:/CLSoilMaps/data/covariates/LandCover/LC_CHILE_2014_b.tif") %>%
+#   crop(cuenca %>% st_transform(32719))
+
+# Raster de referencia
+in.dir = str_c(here("PROC/RAST/calibrated_model_output/",m,"/SWC_summary"))
+swc.up = rast(here(in.dir,str_c("totalswc_mmean_up_mean.tif")))
+
+ref = swc.up
+
+lc = lc.din %>%
+  project(ref, method = "mode") %>%
+  resample(ref, method = "mode") %>% 
+  mask(ref[[1]])
+names(lc) = "LC"
+```
+
+```{r}
+# Tabla con las etiquetas de cada clase
+lc.cats = tibble(
+  ID = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+  nombre = c(
+    "Water bodies",
+    "Beachs, dunes and sandbanks",
+    "Mediterranean sclerophyll Native Forest",
+    "Native Forest",
+    "Forest plantation",
+    "Fruit trees",
+    "Glacier and snow",
+    "Riparian vegetation and wetlands",
+    "Shrub and bush vegetation",
+    "Pinophyte planting",
+    "Grasslands and annual crops",
+    "Meadows and evergreen grasslands",
+    "Bare soil and non-vegetated areas",
+    "Peatlands",
+    "Impermeable surfaces",
+    "Harvested plantation"
+  )
+)
+```
+
+```{r}
+# reglas de reclasificacion
+rcl = rbind(c(16, 5),c(10, 5))
+# reclasificar
+lc.reclass = classify(lc, rcl, right=NA)
+# polygonize raster data
+lc.pol = as.polygons(lc.reclass) %>% st_as_sf()
+```
+
+```{r}
+# Convert raster to a data frame for use with ggplot
+raster_df <- as.data.frame(lc.reclass, xy = TRUE, na.rm = TRUE)
+# Join the raster data frame with the land cover classes
+raster_df <- raster_df %>%
+  rename(layer = 3) %>% 
+  mutate(ID = as.integer(layer)) %>%  # Assuming 'layer' is the column with raster values
+  left_join(lc.cats, by = "ID")
+```
+
+```{r}
+# Plot using ggplot
+lc.plot = ggplot(raster_df, aes(x = x, y = y, fill = nombre)) +
+  geom_raster() +
+  scale_fill_manual(values = c(
+    "Native Forest" = "forestgreen",
+    "Forest plantation" = "purple",
+    "Shrub and bush vegetation" = "orange",
+    "Grasslands and annual crops" = "yellow",
+    "Impermeable surfaces" = "black"
+  ),
+  labels = c(
+    "Forest plantation (Fp)",
+    "Grasslands and annual crops (GC)",
+    "Impermeable surfaces (Is)",
+    "Native Forest (Nf)",
+    "Shrub and bush vegetation (Sh)"
+  )
+  ) +
+  coord_equal() +
+  theme_minimal() +
+  labs(fill = "Land Cover Class", title = "Land Cover Map")
+# lc.plot
+lc.plot.legend = ggpubr::get_legend(lc.plot)
+lc.plot = ggplot(raster_df, aes(x = x, y = y, fill = nombre)) +
+  geom_raster(
+    # show.legend = F
+    ) +
+  scale_fill_manual(values = c(
+    "Native Forest" = "forestgreen",
+    "Forest plantation" = "purple",
+    "Shrub and bush vegetation" = "orange",
+    "Grasslands and annual crops" = "yellow",
+    "Impermeable surfaces" = "black"
+  ),
+  labels = c(
+    "Forest plantation (Fp)",
+    "Grasslands and annual crops (GC)",
+    "Impermeable surfaces (Is)",
+    "Native Forest (Nf)",
+    "Shrub and bush vegetation (Sh)"
+  )
+  ) +
+  coord_equal() +
+  theme_map() +
+  labs(fill = "Land Cover Class", x = "", y = "")+
+  ggtitle("Land Cover Map")+
+  # theme(plot.title = element_text(hjust = 0.5, face = "plain"))+
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text=element_blank(), 
+    axis.ticks=element_blank(), 
+    axis.title=element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "plain"),
+    plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm")
+  )
+```
+
+```{r fig.height=5, fig.width=8}
+lc.plot
+ggsave(filename = here("resultados","figs","land_cover_dinamico_2018.png"), height = 5, width = 8, plot = lc.plot)
+ggsave(filename = here("resultados","figs","land_cover_dinamico_2018.svg"), height = 5, width = 8, plot = lc.plot)
+
+```
+
+```{r}
+pol.lc = tibble(ID = 1:5, LC = lc.pol$LC)
+re.month = c(1:4,11,12)
+ac.month = c(5:10)
+df.et = tibble()
+models = c("CLSM","FAO","SG")
+for (i in 1:length(models)) {
+  # i=1
+  m = models[i]
+  in.dir = str_c("G:/mHM/PROC/RAST/calibrated_model_output/",m,"/aet_summary")
+  aet.up = rast(here(in.dir,str_c("totalaet_mmean_up_mean.tif")))
+  aet.up.re = sum(aet.up[[re.month]])
+  aet.up.ac = sum(aet.up[[ac.month]])
+  aet.deep = rast(here(in.dir,str_c("totalaet_mmean_deep_mean.tif")))
+  aet.deep.re = sum(aet.deep[[re.month]])
+  aet.deep.ac = sum(aet.deep[[ac.month]])
+  
+  df1 = terra::extract(aet.up.ac, lc.pol) %>% as_tibble %>% drop_na() %>% 
+    left_join(pol.lc, by = "ID") %>% 
+    mutate(model = m,
+           season = "Accumulation",
+           depth = "0-100 [cm]")
+  df2 =  terra::extract(aet.up.re, lc.pol) %>% as_tibble %>% drop_na() %>% 
+    left_join(pol.lc, by = "ID") %>%
+    mutate(model = m,
+           season = "Release",
+           depth = "0-100 [cm]")  
+
+  df3 =  terra::extract(aet.deep.ac, lc.pol) %>% as_tibble %>% drop_na() %>% 
+    left_join(pol.lc, by = "ID") %>% 
+    mutate(model = m,
+           season = "Accumulation",
+           depth = "100-200 [cm]")
+  df4 =  terra::extract(aet.deep.re, lc.pol) %>% as_tibble %>% drop_na() %>% 
+    left_join(pol.lc, by = "ID") %>%
+    mutate(model = m,
+           season = "Release",
+           depth = "100-200 [cm]")
+  df = bind_rows(df1,df2,df3,df4)
+  
+  
+  df.et = bind_rows(df.et, df)
+  
+}
+df.et = df.et %>% 
+  left_join(lc.cats, by = c("LC"="ID")) %>%
+  rename(ET = sum) %>% 
+  mutate(nombre = factor(nombre, levels = rev(lc.cats$nombre))) %>% 
+  filter(nombre != "Impermeable surfaces") %>% 
+  filter(season == "Release") %>% 
+  mutate(model = str_c("mHM-",model))
+# df.et
+```
+
+```{r fig.height=4, fig.width=11}
+et.lc.plot = ggplot(df.et)+
+  geom_boxplot(aes(x = nombre, y = ET, color = model), fill = "lightgrey")+
+  facet_wrap(.~depth)+
+  theme_bw()+
+  theme(
+    # axis.text.x = element_text(angle = 30, vjust = 1,hjust = 1),
+    text = element_text(size = 14)
+  )+
+  
+  # scale_color_manual(
+  #   values = lc.model.col,
+  #   # breaks = as.vector(model.leg)
+  # )+
+  scale_x_discrete(labels = c("GC","Sh","Fp","Nf"))+
+  labs(x = "Land Cover", y = "actual Evapotranspiration [mm]", color = "")+
+  scale_color_discrete(type = model.color)
+et.lc.plot
+```
+
+```{r eval=FALSE, include=FALSE}
+ggsave(filename = here("resultados","figs","et_by_cover.png"), width = 10, height = 4, plot = et.lc.plot)
+ggsave(filename = here("resultados","figs","et_by_cover.svg"), width = 10, height = 4, plot = et.lc.plot)
+ggsave(filename = here("resultados","figs","et_by_cover.pdf"), width = 10, height = 4, plot = et.lc.plot)
+```
+
+```{r fig.height=8, fig.width=8}
+comp.plot = ggpubr::ggarrange(lc.plot, et.lc.plot , ncol = 1, nrow = 2,
+                  # heights = c(2,0.7,1),
+                  labels = c("a","b")
+                  # widths = c(1,1)
+                  # align = "v"
+                  )
+comp.plot
+```
+
+## Paper Figure 11
+
+```{r eval=FALSE, fig.height=14, fig.width=10, include=FALSE}
+ggsave(filename = here("resultados","figs","et_season_lc_boxplot.png"), height = 8, width = 8,
+       plot = comp.plot)
+ggsave(filename = here("resultados","figs","et_season_lc_boxplot.svg"), height = 8, width = 8,
+       plot = comp.plot)
+ggsave(filename = here("resultados","figs","et_season_lc_boxplot.pdf"), height = 8, width = 8,
+       plot = comp.plot)
+```
+
+
